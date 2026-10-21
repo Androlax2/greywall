@@ -171,3 +171,71 @@ func TestMaskedPathsFromArgs_ReadsTheMaskHelpersOutput(t *testing.T) {
 		t.Errorf("Exceptions = %v, want only ca-cert.pem", masked.Exceptions)
 	}
 }
+
+func TestFutureDenyReadPaths(t *testing.T) {
+	home := seedLandlockHome(t)
+	t.Setenv("HOME", home)
+	cfg := &config.Config{Filesystem: config.FilesystemConfig{DenyRead: []string{
+		"~/.ssh/id_ed25519",     // exists: masked by bwrap, not a future path
+		"~/.ssh/id_new",         // missing literal path
+		"~/.ssh/id_*",           // glob in the last element
+		"~/.config/*/token",     // glob in a middle element: not supported
+		"~/.local/**/secret",    // recursive glob: not supported
+		"~/missing-dir/key.pem", // missing parent too
+	}}}
+
+	got := futureDenyReadPaths(cfg)
+
+	want := []string{
+		filepath.Join(home, ".ssh", "id_new"),
+		filepath.Join(home, ".ssh", "id_*"),
+		filepath.Join(home, "missing-dir", "key.pem"),
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("futureDenyReadPaths = %v, want %v", got, want)
+	}
+}
+
+func TestExcludeMaskedPaths_PathMissingAtStartGetsNoRule(t *testing.T) {
+	home := seedLandlockHome(t)
+	future := filepath.Join(home, ".ssh", "id_new")
+
+	rules := excludeMaskedPaths([]landlockRule{{home, testReadRights}}, MaskedPaths{Future: []string{future}})
+
+	if effectiveLandlockAccess(rules, future)&LANDLOCK_ACCESS_FS_READ_FILE != 0 {
+		t.Errorf("a deny path created later would be readable; rules=%+v", rules)
+	}
+	if effectiveLandlockAccess(rules, filepath.Join(home, ".ssh", "config")) != testReadRights {
+		t.Errorf("an existing neighbour lost access; rules=%+v", rules)
+	}
+}
+
+func TestExcludeMaskedPaths_GlobMatchCreatedLaterGetsNoRule(t *testing.T) {
+	home := seedLandlockHome(t)
+
+	rules := excludeMaskedPaths([]landlockRule{{home, testReadRights}}, MaskedPaths{
+		Files:  []string{filepath.Join(home, ".ssh", "id_ed25519")},
+		Future: []string{filepath.Join(home, ".ssh", "id_*")},
+	})
+
+	if effectiveLandlockAccess(rules, filepath.Join(home, ".ssh", "id_rsa"))&LANDLOCK_ACCESS_FS_READ_FILE != 0 {
+		t.Errorf("a key matching the glob, created later, would be readable; rules=%+v", rules)
+	}
+	if effectiveLandlockAccess(rules, filepath.Join(home, ".ssh", "config")) != testReadRights {
+		t.Errorf("an existing neighbour lost access; rules=%+v", rules)
+	}
+}
+
+func TestExcludeMaskedPaths_ExistingEntryMatchingADenyGlobGetsNoRule(t *testing.T) {
+	home := seedLandlockHome(t)
+	link := filepath.Join(home, ".ssh", "id_link")
+	if err := os.Symlink(filepath.Join(home, ".bashrc"), link); err != nil {
+		t.Fatal(err)
+	}
+
+	rules := excludeMaskedPaths([]landlockRule{{home, testReadRights}}, MaskedPaths{Future: []string{filepath.Join(home, ".ssh", "id_*")}})
+
+	if landlockRuleAccess(rules, link) != 0 {
+		t.Errorf("an entry matching the deny glob got a rule; rules=%+v", rules)
+	}
+}
