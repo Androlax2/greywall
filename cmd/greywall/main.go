@@ -372,15 +372,17 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	// including --allow — by matching the SOCKS5 login against the container
 	// name. The two MUST stay identical or session-scoped rules silently stop
 	// applying (notably whenever --proxy-user is set).
+	//
+	// The password is a random secret for this run, registered with greyproxy
+	// below: greyproxy refuses this login name with any other password, so
+	// another sandbox cannot borrow this one's rules by using its name.
 	proxyUser := proxyIdentity(proxyUserFlag, cmdName)
-	for _, proxyField := range []*string{&cfg.Network.ProxyURL, &cfg.Network.HTTPProxyURL} {
-		if *proxyField != "" {
-			if u, err := url.Parse(*proxyField); err == nil {
-				u.User = url.UserPassword(proxyUser, "proxy")
-				*proxyField = u.String()
-			}
-		}
+	proxySecret, err := sandbox.GenerateClientSecret()
+	if err != nil {
+		return err
 	}
+	cfg.Network.ProxyURL = proxyURLWithCredentials(cfg.Network.ProxyURL, proxyUser, proxySecret)
+	cfg.Network.HTTPProxyURL = proxyURLWithCredentials(cfg.Network.HTTPProxyURL, proxyUser, proxySecret)
 	if debug {
 		source := "default"
 		switch {
@@ -389,7 +391,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		case cmdName != "":
 			source = "command name"
 		}
-		fmt.Fprintf(os.Stderr, "[greywall] Auto-set proxy credentials to %q:proxy (source: %s)\n", proxyUser, source)
+		fmt.Fprintf(os.Stderr, "[greywall] Auto-set proxy login to %q with a per-run secret (source: %s)\n", proxyUser, source)
 	}
 
 	// Merge CLI forward ports into config
@@ -544,6 +546,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	sessionOpts := &sandbox.RegisterSessionOptions{
 		NetworkRules: sessionNetworkRules,
 		AllowAll:     learning,
+		ClientSecret: proxySecret,
 	}
 
 	// Credential substitution: detect credentials, rewrite .env files, register
@@ -675,13 +678,14 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// If we have network rules or allow_all but didn't register a session yet
-	// (e.g., learning/watch mode, or no credentials detected), register a
-	// session now. The credential block above may have generated a sessionID
-	// without registering it (when no credentials were detected), so we gate
-	// on credSubstitutionActive — which is the source of truth for whether
-	// registration actually happened.
-	if !credSubstitutionActive && (len(sessionNetworkRules) > 0 || learning) {
+	// If the credential block didn't register a session (no credentials
+	// detected, or credential protection off), register one now: always, since
+	// the session carries this run's proxy client secret, and greyproxy refuses
+	// a login whose secret it never saw. The credential block above may have
+	// generated a sessionID without registering it, so we gate on
+	// credSubstitutionActive — the source of truth for whether registration
+	// actually happened.
+	if !credSubstitutionActive {
 		sessionID, err := sandbox.GenerateSessionID()
 		if err == nil {
 			credSessionID = sessionID
@@ -697,9 +701,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 			regResult, err := sandbox.RegisterSession(sessionID, containerName, nil, nil, meta, "", sessionOpts)
 			if err != nil {
-				if debug {
-					fmt.Fprintf(os.Stderr, "[greywall] failed to register network rules session: %v\n", err)
-				}
+				fmt.Fprintf(os.Stderr, "[greywall] warning: could not register this sandbox with greyproxy: %v; a greyproxy that requires client secrets will refuse its network traffic\n", err)
 			} else {
 				if regResult.RulesCreated > 0 && debug {
 					fmt.Fprintf(os.Stderr, "[greywall] Network rules applied: %d rules from profile\n", regResult.RulesCreated)
@@ -937,6 +939,21 @@ func proxyIdentity(proxyUserFlag, cmdName string) string {
 	default:
 		return "proxy"
 	}
+}
+
+// proxyURLWithCredentials returns proxyURL logged in as user with secret as the
+// password, replacing any credentials it had. An empty or unparsable URL is
+// returned unchanged.
+func proxyURLWithCredentials(proxyURL, user, secret string) string {
+	if proxyURL == "" {
+		return proxyURL
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return proxyURL
+	}
+	parsed.User = url.UserPassword(user, secret)
+	return parsed.String()
 }
 
 // extractCommandName extracts a human-readable command name from the arguments.

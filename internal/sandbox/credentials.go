@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -264,6 +267,7 @@ type sessionRequest struct {
 	TTLSeconds        int                `json:"ttl_seconds"`
 	NetworkRules      []NetworkRuleInput `json:"network_rules,omitempty"`
 	AllowAll          bool               `json:"allow_all,omitempty"`
+	ClientSecret      string             `json:"client_secret,omitempty"`
 }
 
 // SessionMetadata holds context about the sandboxed process for dashboard display.
@@ -296,6 +300,9 @@ type RegisterSessionResult struct {
 type RegisterSessionOptions struct {
 	NetworkRules []NetworkRuleInput
 	AllowAll     bool
+	// ClientSecret is the proxy password this sandbox logs in with. greyproxy
+	// refuses its login name with any other password while the session lives.
+	ClientSecret string
 }
 
 // RegisterSession registers credential mappings with greyproxy.
@@ -351,6 +358,7 @@ func RegisterSession(sessionID, containerName string, mappings []CredentialMappi
 	if opts != nil {
 		body.NetworkRules = opts.NetworkRules
 		body.AllowAll = opts.AllowAll
+		body.ClientSecret = opts.ClientSecret
 	}
 
 	data, err := json.Marshal(body)
@@ -358,7 +366,11 @@ func RegisterSession(sessionID, containerName string, mappings []CredentialMappi
 		return nil, fmt.Errorf("marshal session request: %w", err)
 	}
 
-	resp, err := http.Post(apiBase+"/api/sessions", "application/json", bytes.NewReader(data)) //nolint:gosec // local API call
+	req, err := newGreyproxyAPIRequest(http.MethodPost, apiBase+"/api/sessions", bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("register session: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // local API call
 	if err != nil {
 		return nil, fmt.Errorf("register session: %w", err)
 	}
@@ -380,13 +392,89 @@ func RegisterSession(sessionID, containerName string, mappings []CredentialMappi
 	}, nil
 }
 
+// GenerateClientSecret returns a random proxy password for one sandbox:
+// 32 random bytes, base64url without padding (43 characters, URL-safe).
+func GenerateClientSecret() (string, error) {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", fmt.Errorf("generate proxy client secret: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(randomBytes), nil
+}
+
+// greyproxyDataDir returns greyproxy's data directory, in greyproxy's own
+// lookup order: GREYPROXY_DATA_HOME, then XDG_DATA_HOME/greyproxy, then the
+// platform default.
+func greyproxyDataDir() string {
+	if dataHome := os.Getenv("GREYPROXY_DATA_HOME"); dataHome != "" {
+		return dataHome
+	}
+	if xdgDataHome := os.Getenv("XDG_DATA_HOME"); xdgDataHome != "" {
+		return filepath.Join(xdgDataHome, "greyproxy")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, "Library", "Application Support", "greyproxy")
+	}
+	return filepath.Join(home, ".local", "share", "greyproxy")
+}
+
+// greyproxyAPIToken reads the token greyproxy keeps in its data dir for its
+// management API. It returns "" when the file does not exist (a greyproxy too
+// old to have one), and an error when the file exists but cannot be trusted.
+func greyproxyAPIToken() (string, error) {
+	tokenPath := filepath.Join(greyproxyDataDir(), "api-token")
+	fileInfo, err := os.Stat(tokenPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read greyproxy API token: %w", err)
+	}
+	if fileInfo.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("greyproxy API token file %s is accessible to other users (mode %04o)", tokenPath, fileInfo.Mode().Perm())
+	}
+	contents, err := os.ReadFile(tokenPath) //nolint:gosec // greyproxy's own data dir
+	if err != nil {
+		return "", fmt.Errorf("read greyproxy API token: %w", err)
+	}
+	return strings.TrimSpace(string(contents)), nil
+}
+
+// newGreyproxyAPIRequest builds a request to greyproxy's management API,
+// carrying the API token when greyproxy has one.
+func newGreyproxyAPIRequest(method, url string, body io.Reader) (*http.Request, error) {
+	token, err := greyproxyAPIToken()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(method, url, body) //nolint:gosec // local API
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req, nil
+}
+
 // HeartbeatSession sends a heartbeat to keep the session alive.
 func HeartbeatSession(sessionID, apiBase string) error {
 	if apiBase == "" {
 		apiBase = greyproxyAPIBase
 	}
 
-	resp, err := http.Post(apiBase+"/api/sessions/"+sessionID+"/heartbeat", "application/json", nil) //nolint:gosec // local API, sessionID is internally generated
+	req, err := newGreyproxyAPIRequest(http.MethodPost, apiBase+"/api/sessions/"+sessionID+"/heartbeat", nil)
+	if err != nil {
+		return fmt.Errorf("heartbeat: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // local API, sessionID is internally generated
 	if err != nil {
 		return fmt.Errorf("heartbeat: %w", err)
 	}
@@ -407,9 +495,9 @@ func DeleteSession(sessionID, apiBase string) error {
 		apiBase = greyproxyAPIBase
 	}
 
-	req, err := http.NewRequest(http.MethodDelete, apiBase+"/api/sessions/"+sessionID, nil)
+	req, err := newGreyproxyAPIRequest(http.MethodDelete, apiBase+"/api/sessions/"+sessionID, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("delete session: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req) //nolint:gosec // local API, sessionID is internally generated
 	if err != nil {
