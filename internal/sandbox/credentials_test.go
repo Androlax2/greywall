@@ -680,3 +680,43 @@ func TestParseEnvFile(t *testing.T) {
 		}
 	}
 }
+
+func TestSensitiveGreyproxyDirs_IncludesGreyproxyDataHome(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataHome)
+
+	dirs := SensitiveGreyproxyDirs()
+
+	found := false
+	for _, dir := range dirs {
+		if dir == dataHome {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("SensitiveGreyproxyDirs() = %v, missing GREYPROXY_DATA_HOME %s", dirs, dataHome)
+	}
+}
+
+func TestSensitiveGreyproxyDirs_IgnoresARelativeGreyproxyDataHome(t *testing.T) {
+	t.Setenv("GREYPROXY_DATA_HOME", "relative/greyproxy")
+
+	for _, dir := range SensitiveGreyproxyDirs() {
+		if !filepath.IsAbs(dir) {
+			t.Errorf("SensitiveGreyproxyDirs() returned the relative path %q", dir)
+		}
+	}
+}
+
+func TestGreyproxyCACertPath_FollowsGreyproxyDataHome(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataHome)
+	certPath := filepath.Join(dataHome, "ca-cert.pem")
+	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := greyproxyCACertPath(); got != certPath {
+		t.Errorf("greyproxyCACertPath() = %q, want %q", got, certPath)
+	}
+}

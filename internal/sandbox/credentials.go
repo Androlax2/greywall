@@ -858,6 +858,11 @@ func SensitiveGreyproxyDirs() []string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		dirs = append(dirs, filepath.Join(xdg, "greyproxy"))
 	}
+	// greyproxy reads GREYPROXY_DATA_HOME first. A relative value depends on
+	// greyproxy's own working directory, which greywall cannot know.
+	if dataHome := os.Getenv("GREYPROXY_DATA_HOME"); filepath.IsAbs(dataHome) {
+		dirs = append(dirs, filepath.Clean(dataHome))
+	}
 
 	return dirs
 }
