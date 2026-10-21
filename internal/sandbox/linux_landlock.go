@@ -217,8 +217,8 @@ const landlockWriteRights = uint64(
 // hide the files the sandbox itself creates; there the bwrap mask and
 // VerifyMasks are the protection.
 func excludeMaskedPaths(rules []landlockRule, masked MaskedPaths) []landlockRule {
-	hidden := make([]string, 0, len(masked.Files)+len(masked.Dirs))
-	for _, path := range slices.Concat(masked.Files, masked.Dirs) {
+	hidden := make([]string, 0, len(masked.Files)+len(masked.Dirs)+len(masked.Future))
+	for _, path := range slices.Concat(masked.Files, masked.Dirs, masked.Future) {
 		hidden = append(hidden, resolvedPath(path))
 	}
 	exceptions := make([]string, 0, len(masked.Exceptions))
@@ -255,6 +255,8 @@ func splitAroundHidden(root string, access uint64, hidden, exceptions []string) 
 		for _, entry := range entries {
 			path := filepath.Join(dir, entry.Name())
 			switch {
+			case slices.ContainsFunc(hidden, func(hiddenPath string) bool { return matchesHiddenPath(hiddenPath, path) }):
+				planned = append(planned, exceptionRules(path, access, exceptions)...)
 			case entry.Type()&fs.ModeSymlink != 0:
 				// addPathRule follows symlinks: never grant one that leads into,
 				// onto or above a masked path.
@@ -265,8 +267,6 @@ func splitAroundHidden(root string, access uint64, hidden, exceptions []string) 
 					continue
 				}
 				planned = append(planned, landlockRule{path, access})
-			case slices.Contains(hidden, path):
-				planned = append(planned, exceptionRules(path, access, exceptions)...)
 			case slices.ContainsFunc(hidden, func(hiddenPath string) bool { return isSameOrUnder(hiddenPath, path) }):
 				expand(path)
 			default:
@@ -276,6 +276,16 @@ func splitAroundHidden(root string, access uint64, hidden, exceptions []string) 
 	}
 	expand(root)
 	return planned
+}
+
+// matchesHiddenPath reports whether path is hiddenPath, or matches it when
+// hiddenPath is a pattern from futureDenyReadPaths (~/.ssh/id_*).
+func matchesHiddenPath(hiddenPath, path string) bool {
+	if hiddenPath == path {
+		return true
+	}
+	matched, err := filepath.Match(hiddenPath, path)
+	return err == nil && matched
 }
 
 // exceptionRules grants access to the exceptions inside a masked path.
@@ -289,15 +299,23 @@ func exceptionRules(maskedPath string, access uint64, exceptions []string) []lan
 	return planned
 }
 
+// resolvedPath resolves symlinks in the longest existing prefix of path, so a
+// path that does not exist yet compares equal to the rules' resolved paths.
 func resolvedPath(path string) string {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return filepath.Clean(path)
 	}
-	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-		return resolved
+	missingTail := ""
+	for existing := absolute; ; existing = filepath.Dir(existing) {
+		if resolved, err := filepath.EvalSymlinks(existing); err == nil {
+			return filepath.Join(resolved, missingTail)
+		}
+		if filepath.Dir(existing) == existing {
+			return absolute
+		}
+		missingTail = filepath.Join(filepath.Base(existing), missingTail)
 	}
-	return absolute
 }
 
 // isSameOrUnder reports whether path is ancestor itself or lies beneath it.

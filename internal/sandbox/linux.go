@@ -865,6 +865,34 @@ func denyReadMaskArgs(cfg *config.Config) []string {
 	return args
 }
 
+// futureDenyReadPaths returns the denyRead entries bwrap cannot mask because
+// nothing exists there at start: literal paths that are missing, and patterns
+// whose only glob is in the last element (~/.ssh/id_*), since a match can
+// appear later. Patterns with a glob higher up or "**" are left out: Landlock
+// cannot follow them into directories it grants.
+func futureDenyReadPaths(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var future []string
+	for _, pattern := range cfg.Filesystem.DenyRead {
+		normalized := NormalizePath(pattern)
+		if !filepath.IsAbs(normalized) {
+			continue
+		}
+		if !ContainsGlobChars(normalized) {
+			if !fileExists(normalized) && !isSymlink(normalized) {
+				future = append(future, normalized)
+			}
+			continue
+		}
+		if !ContainsGlobChars(filepath.Dir(normalized)) {
+			future = append(future, normalized)
+		}
+	}
+	return future
+}
+
 // sensitiveProjectFileArgs returns bwrap args hiding the sensitive project files
 // in cwd (e.g. .env) in deny-by-default mode. If credential substitution has
 // rewritten a file, the rewritten version (with placeholders) is bound instead;
@@ -1674,7 +1702,11 @@ exit $GREYWALL_STRACE_EXIT
 				fmt.Fprintf(&innerScript, "export GREYWALL_CONFIG_JSON=%s\n", ShellQuoteSingle(string(configJSON)))
 			}
 		}
-		maskedJSON, err := json.Marshal(maskedPathsFromArgs(maskArgs))
+		masked := maskedPathsFromArgs(maskArgs)
+		if !opts.Watch {
+			masked.Future = futureDenyReadPaths(cfg)
+		}
+		maskedJSON, err := json.Marshal(masked)
 		if err != nil {
 			return "", fmt.Errorf("encode masked paths: %w", err)
 		}

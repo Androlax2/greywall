@@ -30,6 +30,10 @@ type MaskedPaths struct {
 	// Exceptions are bound back inside a masked dir on purpose (greyproxy's
 	// public ca-cert.pem).
 	Exceptions []string `json:"exceptions,omitempty"`
+	// Future are denyRead paths that did not exist at start, as literal paths
+	// or with a glob in their last element. bwrap cannot mask them; Landlock
+	// keeps them unreadable if they appear later in a read-only area.
+	Future []string `json:"future,omitempty"`
 }
 
 // MaskedPathsFromEnv reads the MaskedPaths greywall passed to the wrapper.

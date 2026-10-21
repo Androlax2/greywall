@@ -3,8 +3,10 @@
 package sandbox
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +40,14 @@ func TestLandlockHelperProcess(t *testing.T) {
 	if err := ApplyLandlockFromConfig(cfg, cwd, nil, masked, false); err != nil {
 		fmt.Println("ERROR=" + err.Error())
 		os.Exit(1)
+	}
+	if os.Getenv("GREYWALL_TEST_WAIT_FOR_FILES") == "1" {
+		// The parent creates files after Landlock is in place, then answers.
+		fmt.Println("READY")
+		if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
+			fmt.Println("ERROR=" + err.Error())
+			os.Exit(1)
+		}
 	}
 	for _, path := range strings.Split(os.Getenv("GREYWALL_TEST_PROBE_PATHS"), "\n") {
 		if _, err := os.ReadFile(path); err == nil { //nolint:gosec // test probe
@@ -130,5 +140,89 @@ func TestLandlockAloneHidesMaskedSecrets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A denyRead path missing when the sandbox starts, or a later match of a deny
+// glob, must stay unreadable when it appears in a read-only area.
+func TestLandlockAloneHidesDenyPathsCreatedLater(t *testing.T) {
+	homeParent, err := os.MkdirTemp(".", ".landlock-test-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(homeParent) })
+	home, err := filepath.Abs(homeParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(home, ".ssh", "config"), "Host *")
+	writeTestFile(t, filepath.Join(home, ".bashrc"), "alias")
+	masked := MaskedPaths{Future: []string{
+		filepath.Join(home, ".ssh", "id_*"),
+		filepath.Join(home, ".aws", "credentials"),
+	}}
+	maskedJSON, err := json.Marshal(masked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdLater := []string{
+		filepath.Join(home, ".ssh", "id_rsa"),
+		filepath.Join(home, ".aws", "credentials"),
+	}
+	mustBeReadable := []string{filepath.Join(home, ".ssh", "config"), filepath.Join(home, ".bashrc")}
+
+	helper := exec.Command(os.Args[0], "-test.run=^TestLandlockHelperProcess$") //nolint:gosec // re-runs this test binary
+	helper.Dir = t.TempDir()
+	helper.Env = append(os.Environ(),
+		landlockHelperEnvVar+"=1",
+		"GREYWALL_TEST_WAIT_FOR_FILES=1",
+		"GREYWALL_TEST_DEFAULT_DENY_READ=0",
+		"HOME="+home,
+		MaskedPathsEnvVar+"="+string(maskedJSON),
+		"GREYWALL_TEST_PROBE_PATHS="+strings.Join(append(append([]string{}, createdLater...), mustBeReadable...), "\n"),
+	)
+	helperInput, err := helper.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperOutput, err := helper.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(helperOutput)
+	firstLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("helper process gave no output: %v", err)
+	}
+	if strings.HasPrefix(firstLine, "LANDLOCK=unavailable") {
+		_ = helper.Wait()
+		t.Skip("skipping: Landlock is not available here")
+	}
+	if firstLine != "READY\n" {
+		t.Fatalf("helper process: %q", firstLine)
+	}
+	for _, path := range createdLater {
+		writeTestFile(t, path, "SECRET")
+	}
+	if _, err := helperInput.Write([]byte("go\n")); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(reader)
+	if err := helper.Wait(); err != nil {
+		t.Fatalf("helper process failed: %v\n%s", err, rest)
+	}
+	report := string(rest)
+	for _, path := range createdLater {
+		if !strings.Contains(report, "BLOCKED="+path+"\n") {
+			t.Errorf("%s, created after start, is readable\n%s", path, report)
+		}
+	}
+	for _, path := range mustBeReadable {
+		if !strings.Contains(report, "READABLE="+path+"\n") {
+			t.Errorf("%s should stay readable\n%s", path, report)
+		}
 	}
 }
