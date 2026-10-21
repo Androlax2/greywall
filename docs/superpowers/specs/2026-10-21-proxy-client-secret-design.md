@@ -2,8 +2,8 @@
 
 Todo: f2737f68, "Security: proxy clients are identified by username only (password "proxy")".
 Spans three repos: greywall (Androlax2/greywall), greyproxy (Androlax2/greyproxy), dotfiles
-(agent-docker@.service). Each repo is built on Theo's machine from its fork's `dotfiles` branch;
-each change also goes upstream as its own PR.
+(agent-docker@.service). Each repo is built on Theo's machine from its fork's `dotfiles` branch.
+The forks are ours: changes are not sent upstream as pull requests.
 
 ## Why
 
@@ -92,8 +92,8 @@ data dir from sandboxes (#103, on the fork's `dotfiles` branch).
    - If no live session for `name` has a secret: behavior depends on `requireClientSecret`
      (below).
 3. A new greyproxy setting `requireClientSecret` (bool, `greyproxy.yml` under `greyproxy:`, and a
-   matching CLI flag). Default `false` upstream so existing users keep working. The fork's
-   dotfiles config sets it to `true`.
+   matching CLI flag). Default `false`, so a greyproxy started without the fork's config behaves
+   as before. The fork's dotfiles config sets it to `true`.
    - `false`: a name with no secret-bearing session is accepted as today.
    - `true`: such a login is refused, except names listed in `clientSecretExempt` (list of exact
      names, default empty), and the anonymous login (empty user or `proxy`) while
