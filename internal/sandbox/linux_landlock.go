@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unsafe"
 
@@ -18,7 +19,7 @@ import (
 // ApplyLandlockFromConfig creates and applies Landlock restrictions based on config.
 // This should be called before exec'ing the sandboxed command.
 // Returns nil if Landlock is not available (graceful fallback).
-func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []string, debug bool) error {
+func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []string, masked MaskedPaths, debug bool) error {
 	features := DetectLinuxFeatures()
 	if !features.CanUseLandlock() {
 		if debug {
@@ -36,6 +37,12 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 		return nil // Graceful fallback
 	}
 	defer func() { _ = ruleset.Close() }()
+
+	var rules []landlockRule
+	allowRead := func(path string) { rules = append(rules, landlockRule{path, ruleset.readAccess()}) }
+	allowReadWrite := func(path string) {
+		rules = append(rules, landlockRule{path, ruleset.readAccess() | ruleset.writeAccess()})
+	}
 
 	if err := ruleset.Initialize(); err != nil {
 		if debug {
@@ -64,12 +71,7 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 	}
 
 	for _, p := range systemReadPaths {
-		if err := ruleset.AllowRead(p); err != nil && debug {
-			// Ignore errors for paths that don't exist
-			if !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add read path %s: %v\n", p, err)
-			}
-		}
+		allowRead(p)
 	}
 
 	// If /etc/resolv.conf is a cross-mount symlink (e.g., -> /mnt/wsl/resolv.conf
@@ -77,97 +79,71 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 	// otherwise following the symlink hits EACCES.
 	if target, err := filepath.EvalSymlinks("/etc/resolv.conf"); err == nil && target != "/etc/resolv.conf" {
 		targetDir := filepath.Dir(target)
-		if err := ruleset.AllowRead(targetDir); err != nil && debug {
-			fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add resolv.conf target dir %s: %v\n", targetDir, err)
-		}
+		allowRead(targetDir)
 	}
 
 	// Current working directory - read+write access (project directory)
 	if cwd != "" {
-		if err := ruleset.AllowReadWrite(cwd); err != nil && debug {
-			fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add cwd read/write path: %v\n", err)
-		}
+		allowReadWrite(cwd)
 	}
 
 	// Home directory - read access only when not in deny-by-default mode.
 	// In deny-by-default mode, only specific user tooling paths are allowed,
-	// not the entire home directory. Landlock can't selectively deny files
-	// within an allowed directory, so we rely on bwrap mount overlays for
-	// .env file masking.
+	// not the entire home directory. Masked paths under these read-only rules
+	// are carved out by excludeMaskedPaths below; .env in the writable cwd
+	// relies on the bwrap mask and VerifyMasks.
 	defaultDenyRead := cfg != nil && cfg.Filesystem.IsDefaultDenyRead()
 	if !defaultDenyRead {
 		if home, err := os.UserHomeDir(); err == nil {
-			if err := ruleset.AllowRead(home); err != nil && debug {
-				fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add home read path: %v\n", err)
-			}
+			allowRead(home)
 		}
 	} else {
 		// In deny-by-default mode, allow specific user tooling paths
 		if home, err := os.UserHomeDir(); err == nil {
 			for _, p := range GetDefaultReadablePaths() {
 				if strings.HasPrefix(p, home) {
-					if err := ruleset.AllowRead(p); err != nil && debug {
-						fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add user tooling path %s: %v\n", p, err)
-					}
+					allowRead(p)
 				}
 			}
 			// Shell configs
 			shellConfigs := []string{".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile", ".zshenv", ".inputrc"}
 			for _, f := range shellConfigs {
 				p := filepath.Join(home, f)
-				if err := ruleset.AllowRead(p); err != nil && debug {
-					if !os.IsNotExist(err) {
-						fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add shell config %s: %v\n", p, err)
-					}
-				}
+				allowRead(p)
 			}
 			// Home caches
 			homeCaches := []string{".cache", ".npm", ".cargo", ".rustup", ".local", ".config"}
 			for _, d := range homeCaches {
 				p := filepath.Join(home, d)
-				if err := ruleset.AllowRead(p); err != nil && debug {
-					if !os.IsNotExist(err) {
-						fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add home cache %s: %v\n", p, err)
-					}
-				}
+				allowRead(p)
 			}
 		}
 	}
 
 	// /tmp - allow read+write (many programs need this)
-	if err := ruleset.AllowReadWrite("/tmp"); err != nil && debug {
-		fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add /tmp write path: %v\n", err)
-	}
+	allowReadWrite("/tmp")
 
 	// /dev needs read+write for /dev/null, /dev/zero, /dev/tty, etc.
 	// Landlock doesn't support rules on device files directly, so we allow the whole /dev
-	if err := ruleset.AllowReadWrite("/dev"); err != nil && debug {
-		fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add /dev write path: %v\n", err)
-	}
+	allowReadWrite("/dev")
 
 	// Socket paths for proxy communication
 	for _, p := range socketPaths {
 		dir := filepath.Dir(p)
-		if err := ruleset.AllowReadWrite(dir); err != nil && debug {
-			fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add socket path %s: %v\n", dir, err)
-		}
+		allowReadWrite(dir)
 	}
 
 	// User-configured allowRead paths
 	if cfg != nil && cfg.Filesystem.AllowRead != nil {
 		expandedPaths := ExpandGlobPatterns(cfg.Filesystem.AllowRead)
 		for _, p := range expandedPaths {
-			if err := ruleset.AllowRead(p); err != nil && debug {
-				fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add read path %s: %v\n", p, err)
-			}
+			allowRead(p)
 		}
 		// Also add non-glob paths directly
 		for _, p := range cfg.Filesystem.AllowRead {
 			if !ContainsGlobChars(p) {
 				normalized := NormalizePath(p)
-				if err := ruleset.AllowRead(normalized); err != nil && debug {
-					fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add read path %s: %v\n", normalized, err)
-				}
+				allowRead(normalized)
 			}
 		}
 	}
@@ -176,18 +152,22 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 	if cfg != nil && cfg.Filesystem.AllowWrite != nil {
 		expandedPaths := ExpandGlobPatterns(cfg.Filesystem.AllowWrite)
 		for _, p := range expandedPaths {
-			if err := ruleset.AllowReadWrite(p); err != nil && debug {
-				fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add write path %s: %v\n", p, err)
-			}
+			allowReadWrite(p)
 		}
 		// Also add non-glob paths directly
 		for _, p := range cfg.Filesystem.AllowWrite {
 			if !ContainsGlobChars(p) {
 				normalized := NormalizePath(p)
-				if err := ruleset.AllowReadWrite(normalized); err != nil && debug {
-					fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add write path %s: %v\n", normalized, err)
-				}
+				allowReadWrite(normalized)
 			}
+		}
+	}
+
+	// Landlock can only grant, so a masked path is kept out by not granting it:
+	// read-only rules above a masked path are split around it.
+	for _, rule := range excludeMaskedPaths(rules, masked) {
+		if err := ruleset.addPathRule(rule.path, rule.access); err != nil && debug {
+			fmt.Fprintf(os.Stderr, "[greywall:landlock] Warning: failed to add rule for %s: %v\n", rule.path, err)
 		}
 	}
 
@@ -204,6 +184,125 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 	}
 
 	return nil
+}
+
+// landlockRule is one path-beneath rule, before it is added to a ruleset.
+type landlockRule struct {
+	path   string
+	access uint64
+}
+
+const landlockWriteRights = uint64(
+	LANDLOCK_ACCESS_FS_WRITE_FILE |
+		LANDLOCK_ACCESS_FS_REMOVE_DIR |
+		LANDLOCK_ACCESS_FS_REMOVE_FILE |
+		LANDLOCK_ACCESS_FS_MAKE_CHAR |
+		LANDLOCK_ACCESS_FS_MAKE_DIR |
+		LANDLOCK_ACCESS_FS_MAKE_REG |
+		LANDLOCK_ACCESS_FS_MAKE_SOCK |
+		LANDLOCK_ACCESS_FS_MAKE_FIFO |
+		LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+		LANDLOCK_ACCESS_FS_MAKE_SYM,
+)
+
+// excludeMaskedPaths rewrites read-only rules so that none of them grants a
+// masked path. Landlock can only grant, and a rule covers everything beneath
+// its path, so a read-only rule above a masked path is replaced by:
+//   - READ_DIR on the rule's path (names stay listable, contents do not),
+//   - the full access on every entry beside the way down to each masked path,
+//   - the full access on the exceptions inside masked dirs (ca-cert.pem).
+//
+// Entries that appear later directly in a split directory are not readable in
+// the running sandbox. Writable rules are left unchanged: splitting them would
+// hide the files the sandbox itself creates; there the bwrap mask and
+// VerifyMasks are the protection.
+func excludeMaskedPaths(rules []landlockRule, masked MaskedPaths) []landlockRule {
+	hidden := make([]string, 0, len(masked.Files)+len(masked.Dirs))
+	for _, path := range slices.Concat(masked.Files, masked.Dirs) {
+		hidden = append(hidden, resolvedPath(path))
+	}
+	exceptions := make([]string, 0, len(masked.Exceptions))
+	for _, path := range masked.Exceptions {
+		exceptions = append(exceptions, resolvedPath(path))
+	}
+
+	var planned []landlockRule
+	for _, rule := range rules {
+		root := resolvedPath(rule.path)
+		if rule.access&landlockWriteRights != 0 || !slices.ContainsFunc(hidden, func(path string) bool { return isSameOrUnder(path, root) }) {
+			planned = append(planned, rule)
+			continue
+		}
+		planned = append(planned, splitAroundHidden(root, rule.access, hidden, exceptions)...)
+	}
+	return planned
+}
+
+func splitAroundHidden(root string, access uint64, hidden, exceptions []string) []landlockRule {
+	if slices.Contains(hidden, root) {
+		return exceptionRules(root, access, exceptions)
+	}
+	var planned []landlockRule
+	if access&LANDLOCK_ACCESS_FS_READ_DIR != 0 {
+		planned = append(planned, landlockRule{root, LANDLOCK_ACCESS_FS_READ_DIR})
+	}
+	var expand func(dir string)
+	expand = func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return // nothing beside the masked path can be granted: fail closed
+		}
+		for _, entry := range entries {
+			path := filepath.Join(dir, entry.Name())
+			switch {
+			case entry.Type()&fs.ModeSymlink != 0:
+				// addPathRule follows symlinks: never grant one that leads into,
+				// onto or above a masked path.
+				target, err := filepath.EvalSymlinks(path)
+				if err != nil || slices.ContainsFunc(hidden, func(hiddenPath string) bool {
+					return isSameOrUnder(target, hiddenPath) || isSameOrUnder(hiddenPath, target)
+				}) {
+					continue
+				}
+				planned = append(planned, landlockRule{path, access})
+			case slices.Contains(hidden, path):
+				planned = append(planned, exceptionRules(path, access, exceptions)...)
+			case slices.ContainsFunc(hidden, func(hiddenPath string) bool { return isSameOrUnder(hiddenPath, path) }):
+				expand(path)
+			default:
+				planned = append(planned, landlockRule{path, access})
+			}
+		}
+	}
+	expand(root)
+	return planned
+}
+
+// exceptionRules grants access to the exceptions inside a masked path.
+func exceptionRules(maskedPath string, access uint64, exceptions []string) []landlockRule {
+	var planned []landlockRule
+	for _, exception := range exceptions {
+		if isSameOrUnder(exception, maskedPath) && exception != maskedPath {
+			planned = append(planned, landlockRule{exception, access})
+		}
+	}
+	return planned
+}
+
+func resolvedPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return resolved
+	}
+	return absolute
+}
+
+// isSameOrUnder reports whether path is ancestor itself or lies beneath it.
+func isSameOrUnder(path, ancestor string) bool {
+	return path == ancestor || ancestor == "/" || strings.HasPrefix(path, ancestor+string(filepath.Separator))
 }
 
 // LandlockRuleset manages Landlock filesystem restrictions.
@@ -315,11 +414,21 @@ func (l *LandlockRuleset) getHandledAccessFS() uint64 {
 
 // AllowRead adds read access to a path.
 func (l *LandlockRuleset) AllowRead(path string) error {
-	return l.addPathRule(path, LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR|LANDLOCK_ACCESS_FS_EXECUTE)
+	return l.addPathRule(path, l.readAccess())
 }
 
 // AllowWrite adds write access to a path.
 func (l *LandlockRuleset) AllowWrite(path string) error {
+	return l.addPathRule(path, l.writeAccess())
+}
+
+// readAccess is the access AllowRead grants.
+func (l *LandlockRuleset) readAccess() uint64 {
+	return LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE
+}
+
+// writeAccess is the access AllowWrite grants, for this ABI version.
+func (l *LandlockRuleset) writeAccess() uint64 {
 	access := uint64(
 		LANDLOCK_ACCESS_FS_WRITE_FILE |
 			LANDLOCK_ACCESS_FS_REMOVE_DIR |
@@ -349,7 +458,7 @@ func (l *LandlockRuleset) AllowWrite(path string) error {
 		access |= LANDLOCK_ACCESS_FS_IOCTL_DEV
 	}
 
-	return l.addPathRule(path, access)
+	return access
 }
 
 // AllowReadWrite adds full read/write access to a path.
