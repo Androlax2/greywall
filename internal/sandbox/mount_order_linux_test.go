@@ -304,6 +304,7 @@ func seedMountOrderTree(t *testing.T) (home, cwd string) {
 	cwd = t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("GREYPROXY_DATA_HOME", "")
 	t.Chdir(cwd)
 
 	for _, dir := range []string{

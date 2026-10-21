@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -117,21 +116,8 @@ func GenerateProxyEnvVars(proxyURL, httpProxyURL, tmpDir string) []string {
 
 // greyproxyCACertPath returns the path to the greyproxy CA certificate if it exists.
 func greyproxyCACertPath() string {
-	var dataHome string
-	if runtime.GOOS == "darwin" {
-		home, _ := os.UserHomeDir()
-		dataHome = filepath.Join(home, "Library", "Application Support", "greyproxy")
-	} else {
-		// XDG_DATA_HOME or default
-		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-			dataHome = filepath.Join(xdg, "greyproxy")
-		} else {
-			home, _ := os.UserHomeDir()
-			dataHome = filepath.Join(home, ".local", "share", "greyproxy")
-		}
-	}
-	certPath := filepath.Clean(filepath.Join(dataHome, "ca-cert.pem"))
-	if _, err := os.Stat(certPath); err == nil { //nolint:gosec // path is constructed from trusted sources (home dir + constant)
+	certPath := filepath.Clean(filepath.Join(greyproxyDataDir(), "ca-cert.pem"))
+	if _, err := os.Stat(certPath); err == nil { //nolint:gosec // greyproxy's own data dir + constant
 		return certPath
 	}
 	return ""

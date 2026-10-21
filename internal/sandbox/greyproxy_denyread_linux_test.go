@@ -37,6 +37,7 @@ func seedGreyproxyDir(t *testing.T) (string, string) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", "") // use the default ~/.local/share path
+	t.Setenv("GREYPROXY_DATA_HOME", "")
 	dataDir := seedGreyproxyDirIn(t, filepath.Join(home, ".local", "share"))
 	return home, dataDir
 }
@@ -312,4 +313,20 @@ func TestWrapCommandLinux_GreyproxySecretsUnreadableAtRuntime(t *testing.T) {
 	if !strings.Contains(got, "cc=[x]") {
 		t.Errorf("expected cc=[x] (public ca-cert readable at runtime); output:\n%s", got)
 	}
+}
+
+// greyproxy reads GREYPROXY_DATA_HOME before XDG_DATA_HOME and the default, so
+// a data dir moved there must be masked too, with ca-cert.pem still readable.
+func TestWrapCommandLinux_GreyproxySecretsMaskedWithGreyproxyDataHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", "")
+	dataDir := seedGreyproxyDirIn(t, t.TempDir())
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+
+	cmd, err := WrapCommandLinuxWithOptions(&config.Config{}, "true", nil, nil, nil, nil, nil, "", LinuxSandboxOptions{UseLandlock: true, UseSeccomp: true})
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+
+	assertGreyproxyMaskWins(t, parseBwrapMounts(cmd), dataDir)
 }
