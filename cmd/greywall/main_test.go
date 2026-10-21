@@ -110,3 +110,23 @@ func TestProxyIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestProxyURLWithCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		proxyURL string
+		want     string
+	}{
+		{"socks5 default", "socks5://localhost:43052", "socks5://opencode:s3cr3t-value@localhost:43052"},
+		{"http default", "http://localhost:43051", "http://opencode:s3cr3t-value@localhost:43051"},
+		{"replaces existing credentials", "http://someone:proxy@localhost:43051", "http://opencode:s3cr3t-value@localhost:43051"},
+		{"empty stays empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := proxyURLWithCredentials(tt.proxyURL, "opencode", "s3cr3t-value"); got != tt.want {
+				t.Errorf("proxyURLWithCredentials(%q) = %q, want %q", tt.proxyURL, got, tt.want)
+			}
+		})
+	}
+}
