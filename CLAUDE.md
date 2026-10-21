@@ -77,3 +77,10 @@ GitHub Actions workflows: `main.yml` (build/lint/test on Linux+macOS), `release.
 make release          # patch (v0.0.X)
 make release-minor    # minor (v0.X.0)
 ```
+
+## Git authorization
+
+Claude may create feature branches, stage, commit, push feature branches and open pull
+requests on Androlax2/greywall.
+
+Claude may merge pull requests, with `gh pr merge`, once every required check has passed.
