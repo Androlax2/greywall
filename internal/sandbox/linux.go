@@ -1298,6 +1298,10 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		}
 	}
 
+	// The mask helpers' arguments, kept so the wrapper inside the sandbox can
+	// check the masks took effect and keep them out of its Landlock rules.
+	var maskArgs []string
+
 	// In learning/watch modes, skip writable paths, deny rules, and mandatory
 	// deny (the sandbox is already permissive with home + cwd writable).
 	if !opts.Learning && !opts.Watch {
@@ -1362,13 +1366,17 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		// an allowWrite or denyWrite of the working directory binds the real directory,
 		// and bubblewrap's last mount wins, so it re-exposed the real .env.
 		if defaultDenyRead {
-			bwrapArgs = append(bwrapArgs, sensitiveProjectFileArgs(cwd, opts.RewrittenEnvFiles, opts.Debug)...)
+			sensitiveFileMasks := sensitiveProjectFileArgs(cwd, opts.RewrittenEnvFiles, opts.Debug)
+			bwrapArgs = append(bwrapArgs, sensitiveFileMasks...)
+			maskArgs = append(maskArgs, sensitiveFileMasks...)
 		}
 
 		// denyRead masks go after the mandatory and denyWrite read-only binds: those
 		// bind the real path ("--ro-bind p p"), and bubblewrap's last mount wins, so a
 		// denyWrite of ~/.ssh applied after a denyRead of ~/.ssh/id_* re-exposed the key.
-		bwrapArgs = append(bwrapArgs, denyReadMaskArgs(cfg)...)
+		denyReadMasks := denyReadMaskArgs(cfg)
+		bwrapArgs = append(bwrapArgs, denyReadMasks...)
+		maskArgs = append(maskArgs, denyReadMasks...)
 
 	} // end if !opts.Learning && !opts.Watch
 
@@ -1500,7 +1508,9 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	// inside the data dir) from re-exposing the secrets, so don't append binds
 	// after this. Gated on "not learning" so it also covers --watch.
 	if !opts.Learning {
-		bwrapArgs = append(bwrapArgs, greyproxyDenyReadArgs()...)
+		greyproxyMasks := greyproxyDenyReadArgs()
+		bwrapArgs = append(bwrapArgs, greyproxyMasks...)
+		maskArgs = append(maskArgs, greyproxyMasks...)
 	}
 
 	bwrapArgs = append(bwrapArgs, "--", shellPath, "-c")
@@ -1664,6 +1674,11 @@ exit $GREYWALL_STRACE_EXIT
 				fmt.Fprintf(&innerScript, "export GREYWALL_CONFIG_JSON=%s\n", ShellQuoteSingle(string(configJSON)))
 			}
 		}
+		maskedJSON, err := json.Marshal(maskedPathsFromArgs(maskArgs))
+		if err != nil {
+			return "", fmt.Errorf("encode masked paths: %w", err)
+		}
+		fmt.Fprintf(&innerScript, "export %s=%s\n", MaskedPathsEnvVar, ShellQuoteSingle(string(maskedJSON)))
 
 		// Build wrapper command with proper quoting
 		// Use bash -c to preserve shell semantics (e.g., "echo hi && ls")

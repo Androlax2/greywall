@@ -1427,8 +1427,19 @@ parseCommand:
 		// Get current working directory for relative path resolution
 		cwd, _ := os.Getwd()
 
+		// Check the masks before Landlock, which could hide a broken mask.
+		masked, err := sandbox.MaskedPathsFromEnv()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[greywall] refusing to start: %v\n", err)
+			os.Exit(1)
+		}
+		if err := sandbox.VerifyMasks(masked); err != nil {
+			fmt.Fprintf(os.Stderr, "[greywall] refusing to start: %v (a later mount covers its mask)\n", err)
+			os.Exit(1)
+		}
+
 		// Apply Landlock restrictions
-		err := sandbox.ApplyLandlockFromConfig(cfg, cwd, nil, debugMode)
+		err = sandbox.ApplyLandlockFromConfig(cfg, cwd, nil, masked, debugMode)
 		if err != nil {
 			if debugMode {
 				fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] Warning: Landlock not applied: %v\n", err)

@@ -5,7 +5,7 @@ package sandbox
 import "github.com/GreyhavenHQ/greywall/internal/config"
 
 // ApplyLandlockFromConfig is a no-op on non-Linux platforms.
-func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []string, debug bool) error {
+func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []string, masked MaskedPaths, debug bool) error {
 	return nil
 }
 
