@@ -195,6 +195,58 @@ func TestDnsBridge_SendsQueryAsDatagramAndReturnsReply(t *testing.T) {
 	}
 }
 
+// greyproxy's DNS server listens on IPv4 only, but the configured address is
+// "localhost:43053", which resolves to ::1 first. socat's UDP address used IPv4.
+func TestDnsBridge_ReachesIPv4OnlyServerNamedLocalhost(t *testing.T) {
+	skipIfCommandNotFound(t, "socat")
+	dnsServer, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer func() { _ = dnsServer.Close() }()
+	go func() {
+		buf := make([]byte, 512)
+		n, peer, err := dnsServer.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		_, _ = dnsServer.WriteTo(append([]byte("reply:"), buf[:n]...), peer)
+	}()
+	port := dnsServer.LocalAddr().(*net.UDPAddr).Port
+
+	bridge, err := NewDnsBridge("localhost:"+strconv.Itoa(port), false)
+	if err != nil {
+		t.Fatalf("NewDnsBridge: %v", err)
+	}
+	defer bridge.Cleanup()
+
+	conn, err := net.Dial("unix", bridge.SocketPath)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if got := roundTrip(t, conn, "query"); got != "reply:query" {
+		t.Fatalf("expected %q, got %q", "reply:query", got)
+	}
+}
+
+func TestUdpNetworkFor_ForcesIPv4OnlyForHostnames(t *testing.T) {
+	cases := map[string]string{
+		"localhost:43053":   "udp4",
+		"dns.internal:53":   "udp4",
+		"127.0.0.1:43053":   "udp",
+		"[::1]:53":          "udp",
+		"[fd00::53]:5353":   "udp",
+		"missing-port-host": "udp4",
+	}
+	for address, want := range cases {
+		if got := udpNetworkFor(address); got != want {
+			t.Errorf("udpNetworkFor(%q) = %q, want %q", address, got, want)
+		}
+	}
+}
+
 // TestDnsBridge_AnswersTheInSandboxSocatRelay runs the same socat command the
 // sandbox script starts (on a free port instead of 53) against the host relay.
 func TestDnsBridge_AnswersTheInSandboxSocatRelay(t *testing.T) {
