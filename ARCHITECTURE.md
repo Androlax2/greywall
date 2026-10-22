@@ -43,7 +43,7 @@ greywall/
 │   └── sandbox/         # Platform-specific sandboxing
 │       ├── manager.go   # Orchestrates sandbox lifecycle
 │       ├── macos.go     # macOS sandbox-exec profiles
-│       ├── linux.go     # Linux bubblewrap + socat bridges + D-Bus proxy
+│       ├── linux.go     # Linux bubblewrap + bridges + D-Bus proxy
 │       ├── linux_seccomp.go    # Seccomp BPF syscall filtering
 │       ├── linux_landlock.go   # Landlock filesystem control
 │       ├── linux_ebpf.go       # eBPF violation monitoring
@@ -168,15 +168,15 @@ flowchart TB
     subgraph Host
         PROXY["External SOCKS5 Proxy<br/>(e.g. GreyProxy :43052)"]
         DNS["DNS Server<br/>(:43053)"]
-        PSOCAT["socat<br/>(proxy bridge)"]
-        DSOCAT["socat<br/>(DNS bridge)"]
+        PSOCAT["greywall<br/>(proxy bridge)"]
+        DSOCAT["greywall<br/>(DNS bridge)"]
         USOCK["Unix Sockets<br/>/tmp/greywall-*.sock"]
     end
 
     subgraph Sandbox ["Sandbox (bwrap --unshare-net)"]
         CMD["User Command"]
         TUN["tun2socks<br/>(TUN device)"]
-        ISOCAT["socat<br/>(relay)"]
+        ISOCAT["socat<br/>(DNS relay, env-var fallback)"]
     end
 
     PROXY <--> PSOCAT
@@ -184,18 +184,18 @@ flowchart TB
     PSOCAT <--> USOCK
     DSOCAT <--> USOCK
     USOCK <-->|bind-mounted| ISOCAT
+    USOCK <-->|bind-mounted| TUN
     CMD -->|all traffic| TUN
-    TUN --> ISOCAT
 ```
 
 **How it works:**
 
 With `--unshare-net`, the sandbox has its own isolated network namespace. Unix sockets provide filesystem-based IPC across namespace boundaries:
 
-1. Host creates Unix sockets, connects via socat to the external SOCKS5 proxy and DNS server
+1. greywall creates Unix sockets on the host and relays them in-process (one goroutine per connection) to the external SOCKS5 proxy and DNS server
 2. Socket files are bind-mounted into the sandbox
-3. Inside the sandbox, a TUN device routes all traffic through `tun2socks`, which forwards to the external proxy via the Unix socket bridge
-4. If TUN is unavailable, greywall falls back to setting proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`)
+3. Inside the sandbox, a TUN device routes all traffic through `tun2socks`, which dials the proxy bridge's Unix socket directly; a socat relay turns UDP DNS queries on port 53 into connections to the DNS bridge socket
+4. If TUN is unavailable, greywall falls back to setting proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), with a socat listener on 127.0.0.1:18321 in front of the proxy bridge socket
 
 ## Inbound Connections (Reverse Bridge)
 
@@ -206,7 +206,7 @@ flowchart TB
     EXT["External Request"]
 
     subgraph Host
-        HSOCAT["socat<br/>TCP-LISTEN:8888"]
+        HSOCAT["greywall<br/>listens on :8888"]
         USOCK["Unix Socket<br/>/tmp/greywall-rev-8888-*.sock"]
     end
 
@@ -223,7 +223,7 @@ flowchart TB
 
 Flow:
 
-1. Host socat listens on TCP port (e.g., 8888)
+1. greywall listens on the host TCP port (e.g., 8888)
 2. Sandbox socat creates Unix socket, forwards to app
 3. External request → Host:8888 → Unix socket → Sandbox socat → App:8888
 
