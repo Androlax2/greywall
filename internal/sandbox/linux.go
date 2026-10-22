@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -26,17 +27,17 @@ type ProxyBridge struct {
 	ProxyUser  string // Username from ProxyURL (if any)
 	ProxyPass  string // Password from ProxyURL (if any)
 	HasAuth    bool   // Whether credentials were provided
-	process    *exec.Cmd
+	relay      *relay
 	debug      bool
 }
 
 // DnsBridge bridges DNS queries from the sandbox to a host-side DNS server via Unix socket.
 // Inside the sandbox, a socat relay converts UDP DNS queries (port 53) to the Unix socket.
-// On the host, socat forwards from the Unix socket to the actual DNS server (UDP).
+// On the host, greywall forwards from the Unix socket to the actual DNS server (UDP).
 type DnsBridge struct {
 	SocketPath string // Unix socket path
 	DnsAddr    string // Host-side DNS address (host:port)
-	process    *exec.Cmd
+	relay      *relay
 	debug      bool
 }
 
@@ -55,45 +56,27 @@ func NewDnsBridge(dnsAddr string, debug bool) (*DnsBridge, error) {
 	tmpDir := os.TempDir()
 	socketPath := filepath.Join(tmpDir, fmt.Sprintf("greywall-dns-%s.sock", socketID))
 
-	bridge := &DnsBridge{
-		SocketPath: socketPath,
-		DnsAddr:    dnsAddr,
-		debug:      debug,
-	}
-
-	// Start bridge: Unix socket -> DNS server UDP
-	socatArgs := []string{
-		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socketPath),
-		fmt.Sprintf("UDP:%s", dnsAddr),
-	}
-	bridge.process = exec.Command("socat", socatArgs...) //nolint:gosec // args constructed from trusted input
-	if debug {
-		fmt.Fprintf(os.Stderr, "[greywall:linux] Starting DNS bridge: socat %s\n", strings.Join(socatArgs, " "))
-	}
-	if err := bridge.process.Start(); err != nil {
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
 		return nil, fmt.Errorf("failed to start DNS bridge: %w", err)
 	}
 
-	// Wait for socket to be created
-	for range 50 {
-		if fileExists(socketPath) {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[greywall:linux] DNS bridge ready (%s -> %s)\n", socketPath, dnsAddr)
-			}
-			return bridge, nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	bridge := &DnsBridge{
+		SocketPath: socketPath,
+		DnsAddr:    dnsAddr,
+		relay:      startRelay("DNS bridge", listener, dnsOverStream("DNS bridge", dnsAddr, debug)),
+		debug:      debug,
 	}
-
-	bridge.Cleanup()
-	return nil, fmt.Errorf("timeout waiting for DNS bridge socket to be created")
+	if debug {
+		fmt.Fprintf(os.Stderr, "[greywall:linux] DNS bridge ready (%s -> %s)\n", socketPath, dnsAddr)
+	}
+	return bridge, nil
 }
 
 // Cleanup stops the DNS bridge and removes the socket file.
 func (b *DnsBridge) Cleanup() {
-	if b.process != nil && b.process.Process != nil {
-		_ = b.process.Process.Kill()
-		_ = b.process.Wait()
+	if b.relay != nil {
+		b.relay.Close()
 	}
 	_ = os.Remove(b.SocketPath)
 
@@ -102,11 +85,11 @@ func (b *DnsBridge) Cleanup() {
 	}
 }
 
-// ReverseBridge holds the socat bridge processes for inbound connections.
+// ReverseBridge holds the host listeners for inbound connections.
 type ReverseBridge struct {
 	Ports       []int
 	SocketPaths []string // Unix socket paths for each port
-	processes   []*exec.Cmd
+	relays      []*relay
 	debug       bool
 }
 
@@ -141,7 +124,7 @@ type LinuxSandboxOptions struct {
 }
 
 // NewProxyBridge creates a Unix socket bridge to an external SOCKS5 proxy.
-// The bridge uses socat to forward from a Unix socket to the external proxy's TCP address.
+// greywall itself forwards from the Unix socket to the external proxy's TCP address.
 func NewProxyBridge(proxyURL string, debug bool) (*ProxyBridge, error) {
 	if _, err := exec.LookPath("socat"); err != nil {
 		return nil, fmt.Errorf("socat is required on Linux but not found: %w", err)
@@ -175,39 +158,22 @@ func NewProxyBridge(proxyURL string, debug bool) (*ProxyBridge, error) {
 		bridge.ProxyPass, _ = u.User.Password()
 	}
 
-	// Start bridge: Unix socket -> external SOCKS5 proxy TCP
-	socatArgs := []string{
-		fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socketPath),
-		fmt.Sprintf("TCP:%s:%s", bridge.ProxyHost, bridge.ProxyPort),
-	}
-	bridge.process = exec.Command("socat", socatArgs...) //nolint:gosec // args constructed from trusted input
-	if debug {
-		fmt.Fprintf(os.Stderr, "[greywall:linux] Starting proxy bridge: socat %s\n", strings.Join(socatArgs, " "))
-	}
-	if err := bridge.process.Start(); err != nil {
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
 		return nil, fmt.Errorf("failed to start proxy bridge: %w", err)
 	}
-
-	// Wait for socket to be created, up to 5 seconds
-	for range 50 {
-		if fileExists(socketPath) {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[greywall:linux] Proxy bridge ready (%s)\n", socketPath)
-			}
-			return bridge, nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	proxyAddr := net.JoinHostPort(bridge.ProxyHost, bridge.ProxyPort)
+	bridge.relay = startRelay("proxy bridge", listener, streamTo("proxy bridge", "tcp", proxyAddr, debug))
+	if debug {
+		fmt.Fprintf(os.Stderr, "[greywall:linux] Proxy bridge ready (%s -> %s)\n", socketPath, proxyAddr)
 	}
-
-	bridge.Cleanup()
-	return nil, fmt.Errorf("timeout waiting for proxy bridge socket to be created")
+	return bridge, nil
 }
 
-// Cleanup stops the bridge process and removes the socket file.
+// Cleanup stops the bridge and removes the socket file.
 func (b *ProxyBridge) Cleanup() {
-	if b.process != nil && b.process.Process != nil {
-		_ = b.process.Process.Kill()
-		_ = b.process.Wait()
+	if b.relay != nil {
+		b.relay.Close()
 	}
 	_ = os.Remove(b.SocketPath)
 
@@ -229,6 +195,19 @@ func parseProxyURL(proxyURL string) (*url.URL, error) {
 		return nil, fmt.Errorf("proxy URL must include hostname and port")
 	}
 	return u, nil
+}
+
+// tun2socksProxyURL returns the -proxy argument that makes tun2socks speak
+// SOCKS5 over the bridge's Unix socket: an empty host selects the socket path.
+// Many SOCKS5 proxies require the username/password auth flow even without
+// real credentials (e.g., gost always selects method 0x02), so the bridge's
+// userinfo is passed on to make tun2socks offer both auth methods.
+func tun2socksProxyURL(bridge *ProxyBridge) string {
+	proxyURL := url.URL{Scheme: "socks5", Path: bridge.SocketPath}
+	if bridge.HasAuth {
+		proxyURL.User = url.UserPassword(bridge.ProxyUser, bridge.ProxyPass)
+	}
+	return proxyURL.String()
 }
 
 // NewReverseBridge creates Unix socket bridges for inbound connections.
@@ -262,22 +241,16 @@ func NewReverseBridge(ports []int, debug bool) (*ReverseBridge, error) {
 		socketPath := filepath.Join(socketDir, fmt.Sprintf("%d.sock", port))
 		bridge.SocketPaths = append(bridge.SocketPaths, socketPath)
 
-		// Start reverse bridge: TCP listen on host port -> Unix socket
-		// The sandbox will create the Unix socket with UNIX-LISTEN
-		// We use retry to wait for the socket to be created by the sandbox
-		args := []string{
-			fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr", port),
-			fmt.Sprintf("UNIX-CONNECT:%s,retry=50,interval=0.1", socketPath),
-		}
-		proc := exec.Command("socat", args...) //nolint:gosec // args constructed from trusted input
-		if debug {
-			fmt.Fprintf(os.Stderr, "[greywall:linux] Starting reverse bridge for port %d: socat %s\n", port, strings.Join(args, " "))
-		}
-		if err := proc.Start(); err != nil {
+		// TCP listen on host port -> Unix socket. The sandbox creates the Unix
+		// socket later, so each connection retries until it appears.
+		// Same address socat's TCP-LISTEN used: all IPv4 interfaces.
+		listener, err := net.Listen("tcp4", fmt.Sprintf(":%d", port))
+		if err != nil {
 			bridge.Cleanup()
 			return nil, fmt.Errorf("failed to start reverse bridge for port %d: %w", port, err)
 		}
-		bridge.processes = append(bridge.processes, proc)
+		name := fmt.Sprintf("reverse bridge :%d", port)
+		bridge.relays = append(bridge.relays, startRelay(name, listener, streamToUnixWithRetry(name, socketPath, debug)))
 	}
 
 	if debug {
@@ -287,13 +260,10 @@ func NewReverseBridge(ports []int, debug bool) (*ReverseBridge, error) {
 	return bridge, nil
 }
 
-// Cleanup stops the reverse bridge processes and removes socket files.
+// Cleanup stops the reverse bridge listeners and removes socket files.
 func (b *ReverseBridge) Cleanup() {
-	for _, proc := range b.processes {
-		if proc != nil && proc.Process != nil {
-			_ = proc.Process.Kill()
-			_ = proc.Wait()
-		}
+	for _, r := range b.relays {
+		r.Close()
 	}
 
 	// Clean up socket files and directory
@@ -310,12 +280,12 @@ func (b *ReverseBridge) Cleanup() {
 }
 
 // ForwardBridge bridges host localhost ports into the sandbox via Unix sockets.
-// Host side: socat listens on a Unix socket and forwards to localhost:PORT.
+// Host side: greywall listens on a Unix socket and forwards to localhost:PORT.
 // Sandbox side: socat listens on localhost:PORT and forwards through the Unix socket.
 type ForwardBridge struct {
 	Ports       []int
 	SocketPaths []string // Unix socket paths for each port
-	processes   []*exec.Cmd
+	relays      []*relay
 	debug       bool
 }
 
@@ -350,20 +320,15 @@ func NewForwardBridge(ports []int, debug bool) (*ForwardBridge, error) {
 		socketPath := filepath.Join(socketDir, fmt.Sprintf("%d.sock", port))
 		bridge.SocketPaths = append(bridge.SocketPaths, socketPath)
 
-		// Start forward bridge: Unix socket listen -> TCP connect to host localhost:port
-		args := []string{
-			fmt.Sprintf("UNIX-LISTEN:%s,fork,reuseaddr", socketPath),
-			fmt.Sprintf("TCP:127.0.0.1:%d", port),
-		}
-		proc := exec.Command("socat", args...) //nolint:gosec // args constructed from trusted input
-		if debug {
-			fmt.Fprintf(os.Stderr, "[greywall:linux] Starting forward bridge for port %d: socat %s\n", port, strings.Join(args, " "))
-		}
-		if err := proc.Start(); err != nil {
+		// Unix socket listen -> TCP connect to host localhost:port
+		listener, err := net.Listen("unix", socketPath)
+		if err != nil {
 			bridge.Cleanup()
 			return nil, fmt.Errorf("failed to start forward bridge for port %d: %w", port, err)
 		}
-		bridge.processes = append(bridge.processes, proc)
+		name := fmt.Sprintf("forward bridge :%d", port)
+		target := fmt.Sprintf("127.0.0.1:%d", port)
+		bridge.relays = append(bridge.relays, startRelay(name, listener, streamTo(name, "tcp", target, debug)))
 	}
 
 	if debug {
@@ -373,13 +338,10 @@ func NewForwardBridge(ports []int, debug bool) (*ForwardBridge, error) {
 	return bridge, nil
 }
 
-// Cleanup stops the forward bridge processes and removes socket files.
+// Cleanup stops the forward bridge listeners and removes socket files.
 func (b *ForwardBridge) Cleanup() {
-	for _, proc := range b.processes {
-		if proc != nil && proc.Process != nil {
-			_ = proc.Process.Kill()
-			_ = proc.Wait()
-		}
+	for _, r := range b.relays {
+		r.Close()
 	}
 
 	for _, socketPath := range b.SocketPaths {
@@ -1559,16 +1521,6 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	}
 
 	if proxyBridge != nil && tun2socksPath != "" && features.CanUseTransparentProxy() {
-		// Build the tun2socks proxy URL with credentials if available
-		// Many SOCKS5 proxies require the username/password auth flow even
-		// without real credentials (e.g., gost always selects method 0x02).
-		// Including userinfo ensures tun2socks offers both auth methods.
-		tun2socksProxyURL := "socks5://127.0.0.1:${PROXY_PORT}"
-		if proxyBridge.HasAuth {
-			userinfo := url.UserPassword(proxyBridge.ProxyUser, proxyBridge.ProxyPass)
-			tun2socksProxyURL = fmt.Sprintf("socks5://%s@127.0.0.1:${PROXY_PORT}", userinfo.String())
-		}
-
 		// Set up transparent proxy via TUN device + tun2socks
 		fmt.Fprintf(&innerScript, `
 # Bring up loopback interface (needed for socat to bind on 127.0.0.1)
@@ -1580,16 +1532,12 @@ ip addr add 198.18.0.1/15 dev tun0
 ip link set dev tun0 up
 ip route add default via 198.18.0.1 dev tun0
 
-# Bridge: local port -> Unix socket -> host -> external SOCKS5 proxy
-PROXY_PORT=18321
-socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null 2>&1 &
-BRIDGE_PID=$!
-
-# Start tun2socks (transparent proxy via gvisor netstack)
+# Start tun2socks (transparent proxy via gvisor netstack); it dials the
+# Unix socket bridged to the host's SOCKS5 proxy directly.
 /tmp/greywall-tun2socks -device tun0 -proxy %s >/dev/null 2>&1 &
 TUN2SOCKS_PID=$!
 
-`, proxyBridge.SocketPath, tun2socksProxyURL)
+`, ShellQuoteSingle(tun2socksProxyURL(proxyBridge)))
 
 		// DNS relay: only needed when using a dedicated DNS bridge.
 		// When using tun2socks without a DNS bridge, resolv.conf is configured with
