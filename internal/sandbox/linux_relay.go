@@ -168,6 +168,17 @@ func copyHalf(wg *sync.WaitGroup, dst, src net.Conn) {
 	_ = dst.Close()
 }
 
+// udpNetworkFor resolves hostnames to IPv4 only, like socat's UDP address:
+// "localhost" resolves to ::1 first, and unlike TCP a UDP dial cannot notice
+// that nothing listens there and fall back. IP literals are dialed as given.
+func udpNetworkFor(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err == nil && net.ParseIP(host) != nil {
+		return "udp"
+	}
+	return "udp4"
+}
+
 // dnsOverStream returns a handler for the socat DNS relay inside the sandbox
 // (UDP4-RECVFROM:53,fork -> UNIX-CONNECT): it writes one query per
 // connection, shuts down its write side, and waits briefly for the reply.
@@ -176,7 +187,7 @@ func copyHalf(wg *sync.WaitGroup, dst, src net.Conn) {
 func dnsOverStream(name, dnsAddr string, debug bool) relayHandler {
 	return func(ctx context.Context, downstream net.Conn) {
 		dialer := net.Dialer{Timeout: relayDialTimeout}
-		upstream, err := dialer.DialContext(ctx, "udp", dnsAddr)
+		upstream, err := dialer.DialContext(ctx, udpNetworkFor(dnsAddr), dnsAddr)
 		if err != nil {
 			if debug {
 				fmt.Fprintf(os.Stderr, "[greywall:linux] %s: dial udp %s: %v\n", name, dnsAddr, err)
