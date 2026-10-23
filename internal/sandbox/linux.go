@@ -266,7 +266,7 @@ func NewReverseBridge(ports []int, debug bool) (*ReverseBridge, error) {
 		// The sandbox will create the Unix socket with UNIX-LISTEN
 		// We use retry to wait for the socket to be created by the sandbox
 		args := []string{
-			fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr", port),
+			fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,bind=127.0.0.1", port),
 			fmt.Sprintf("UNIX-CONNECT:%s,retry=50,interval=0.1", socketPath),
 		}
 		proc := exec.Command("socat", args...) //nolint:gosec // args constructed from trusted input

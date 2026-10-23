@@ -12,6 +12,9 @@
 
 set -euo pipefail
 
+# Prompts are captured with stderr and cannot be answered visibly here.
+exec </dev/null
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
