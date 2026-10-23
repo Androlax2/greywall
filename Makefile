@@ -103,7 +103,7 @@ fmt:
 
 fmt-check:
 	@echo "Checking formatting..."
-	@UNFORMATTED=$$(gofumpt -l .); \
+	@UNFORMATTED=$$(gofumpt -l .) || exit $$?; \
 	if [ -n "$$UNFORMATTED" ]; then \
 		echo "The following files need formatting (run 'make fmt'):"; \
 		echo "$$UNFORMATTED"; \
