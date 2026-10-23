@@ -1211,6 +1211,14 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	if opts.UseLandlock && !features.CanUseLandlock() {
 		return "", fmt.Errorf("refusing to start: requested Landlock is unavailable")
 	}
+	var sshDenied []string
+	if cfg != nil && !opts.Learning && !opts.Watch {
+		sshDenied = ExpandGlobPatterns(cfg.Filesystem.DenyRead)
+	}
+	sshConfigArgs, sshConfigFDs, err := systemSSHConfigArgs("/etc/ssh/ssh_config.d", sshDenied)
+	if err != nil {
+		return "", fmt.Errorf("prepare system SSH configuration: %w", err)
+	}
 
 	if opts.Debug {
 		fmt.Fprintf(os.Stderr, "[greywall:linux] Available features: %s\n", features.Summary())
@@ -1406,6 +1414,8 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 			}
 		}
 
+		bwrapArgs = append(bwrapArgs, sshConfigArgs...)
+
 		// Sensitive project files are masked after the allowWrite and denyWrite binds:
 		// an allowWrite or denyWrite of the working directory binds the real directory,
 		// and bubblewrap's last mount wins, so it re-exposed the real .env.
@@ -1423,6 +1433,9 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		maskArgs = append(maskArgs, denyReadMasks...)
 
 	} // end if !opts.Learning && !opts.Watch
+	if opts.Learning || opts.Watch {
+		bwrapArgs = append(bwrapArgs, sshConfigArgs...)
+	}
 
 	// Bind the proxy bridge Unix socket into the sandbox (needs to be writable)
 	var dnsRelayResolvConf string // temp file path for custom resolv.conf
@@ -1778,7 +1791,7 @@ exit $GREYWALL_STRACE_EXIT
 	}
 
 	// Build the final command
-	bwrapCmd := ShellQuote(bwrapArgs)
+	bwrapCmd := sshConfigFDs + ShellQuote(bwrapArgs)
 
 	// If seccomp filter is enabled, wrap with fd redirection
 	// bwrap --seccomp expects the filter on the specified fd
