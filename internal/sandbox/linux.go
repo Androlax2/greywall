@@ -1336,6 +1336,11 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 
 		// Make writable paths actually writable (override read-only root)
 		bwrapArgs = append(bwrapArgs, writableBindArgs(cfg)...)
+		gitArgs, err := gitProtectionArgs(cfg, cwd)
+		if err != nil {
+			return "", err
+		}
+		bwrapArgs = append(bwrapArgs, gitArgs...)
 
 		// Apply mandatory deny patterns (make dangerous files/dirs read-only)
 		// This overrides any writable mounts for these paths
