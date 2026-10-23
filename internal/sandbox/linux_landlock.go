@@ -22,7 +22,7 @@ import (
 func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []string, masked MaskedPaths, debug bool) error {
 	features := DetectLinuxFeatures()
 	if !features.CanUseLandlock() {
-		return fmt.Errorf("Landlock is unavailable")
+		return fmt.Errorf("cannot apply Landlock: feature is unavailable")
 	}
 
 	ruleset, err := NewLandlockRuleset(debug)

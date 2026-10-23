@@ -361,7 +361,7 @@ func RegisterSession(sessionID, containerName string, mappings []CredentialMappi
 		body.ClientSecret = opts.ClientSecret
 	}
 
-	data, err := json.Marshal(body)
+	data, err := json.Marshal(body) // #nosec G117 -- greyproxy registration requires the per-run client_secret in its request payload
 	if err != nil {
 		return nil, fmt.Errorf("marshal session request: %w", err)
 	}
@@ -817,7 +817,7 @@ func WarnMaskedEnvFiles(cwd string) {
 	}
 	for _, f := range SensitiveProjectFiles {
 		p := filepath.Join(cwd, f)
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(p); err == nil { // #nosec G703 -- inspects only known sensitive basenames beneath the supplied working directory
 			fmt.Fprintf(os.Stderr, "[greywall:cred] WARNING: %s will appear empty inside the sandbox because credential substitution is not active\n", f)
 		}
 	}

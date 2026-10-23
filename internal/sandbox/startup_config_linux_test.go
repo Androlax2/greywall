@@ -58,7 +58,7 @@ func TestStartupConfigProtection(t *testing.T) {
 			}
 			if exists {
 				for _, path := range files {
-					contents, err := os.ReadFile(filepath.Join(project, path))
+					contents, err := os.ReadFile(filepath.Join(project, path)) // #nosec G304 -- reads fixed fixture names under this test's temporary project
 					if err != nil || string(contents) != "preserve this content" {
 						t.Errorf("existing content changed: %s: %v", path, err)
 					}

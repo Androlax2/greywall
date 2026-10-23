@@ -26,12 +26,12 @@ func TestProxyBridge_UsesSocat(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, childList := range childLists {
-		children, err := os.ReadFile(childList)
+		children, err := os.ReadFile(childList) // #nosec G304 -- path comes from the kernel's /proc/self/task/*/children entries
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, child := range strings.Fields(string(children)) {
-			name, err := os.ReadFile("/proc/" + child + "/comm")
+			name, err := os.ReadFile("/proc/" + child + "/comm") // #nosec G304 G703 -- PID comes from this process's kernel-provided child list
 			if err == nil && strings.TrimSpace(string(name)) == "socat" {
 				return
 			}

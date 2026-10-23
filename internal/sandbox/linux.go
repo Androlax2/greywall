@@ -651,7 +651,7 @@ func resolveToolPath(p string) string {
 
 // isDirectory returns true if the path exists and is a directory.
 func isDirectory(path string) bool {
-	info, err := os.Stat(path)
+	info, err := os.Stat(path) // #nosec G703 -- sandbox mount planning intentionally inspects configured paths
 	if err != nil {
 		return false
 	}
@@ -660,7 +660,7 @@ func isDirectory(path string) bool {
 
 // isSymlink returns true if the path is a symbolic link.
 func isSymlink(path string) bool {
-	info, err := os.Lstat(path) // Lstat doesn't follow symlinks
+	info, err := os.Lstat(path) // #nosec G703 -- mount planning inspects configured paths without following symlinks
 	if err != nil {
 		return false
 	}

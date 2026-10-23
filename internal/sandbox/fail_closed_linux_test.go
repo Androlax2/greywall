@@ -43,7 +43,7 @@ func TestWrapCommandLinux_FailedNamespaceNeverRunsCommand(t *testing.T) {
 	program := "#!/bin/sh\nfor arg in \"$@\"; do\n" +
 		"if [ \"$arg\" = --unshare-net ]; then exit 42; fi\n" +
 		"done\nprintf HOST_NETWORK_COMMAND_RAN\n"
-	if err := os.WriteFile(filepath.Join(bin, "bwrap"), []byte(program), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "bwrap"), []byte(program), 0o700); err != nil { // #nosec G306 -- owner-only executable fixture tests the real command entry point
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

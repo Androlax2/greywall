@@ -17,14 +17,38 @@ import (
 	"github.com/GreyhavenHQ/greywall/internal/config"
 )
 
+func networkCoverageUnavailable(t *testing.T, format string, arguments ...any) {
+	t.Helper()
+	reason := fmt.Sprintf(format, arguments...)
+	if os.Getenv("GREYWALL_REQUIRE_NETWORK_TESTS") == "1" {
+		t.Fatalf("required network coverage unavailable: %s", reason)
+	}
+	t.Skip(reason)
+}
+
+func requireNetworkHelperTools(t *testing.T, additionalTools ...string) {
+	t.Helper()
+	if os.Getenv("GREYWALL_SANDBOX") == "1" {
+		networkCoverageUnavailable(t, "already running inside Greywall sandbox")
+	}
+	tools := []string{"bwrap", "ip", "socat", "unshare", "setpriv", "ss"}
+	if os.Getenv("GREYWALL_REQUIRE_NETWORK_TESTS") == "1" {
+		tools = append(tools, "python3")
+	}
+	for _, tool := range append(tools, additionalTools...) {
+		if _, err := exec.LookPath(tool); err != nil {
+			networkCoverageUnavailable(t, "command %q not found", tool)
+		}
+	}
+}
+
 func networkHelperFixtures(t *testing.T) (*ProxyBridge, *DnsBridge, string) {
 	t.Helper()
-	skipIfAlreadySandboxed(t)
-	for _, tool := range []string{"bwrap", "ip", "socat"} {
-		skipIfCommandNotFound(t, tool)
-	}
-	if _, err := os.Stat("/dev/net/tun"); err != nil {
-		t.Skipf("TUN device unavailable: %v", err)
+	requireNetworkHelperTools(t)
+	if device, err := os.Stat("/dev/net/tun"); err != nil {
+		networkCoverageUnavailable(t, "TUN device unavailable: %v", err)
+	} else if device.Mode()&os.ModeCharDevice == 0 {
+		networkCoverageUnavailable(t, "/dev/net/tun is not a character device")
 	}
 	seedGreyproxyDir(t)
 	bridge, err := NewProxyBridge("socks5://127.0.0.1:1", false)

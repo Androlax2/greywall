@@ -204,6 +204,39 @@ func TestGitProtection_RejectsSymlinkedMetadata(t *testing.T) {
 	}
 }
 
+func TestGitProtection_RejectedHooksPathDoesNotCreateDirectories(t *testing.T) {
+	for _, pathKind := range []string{"relative", "absolute"} {
+		t.Run(pathKind, func(t *testing.T) {
+			seedGreyproxyDir(t)
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			repo := t.TempDir()
+			outside := t.TempDir()
+			runFixtureGit(t, repo, "init", "-q")
+			link := filepath.Join(repo, "hooks-link")
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			hooksPath := filepath.Join("hooks-link", "new", "hooks")
+			if pathKind == "absolute" {
+				hooksPath = filepath.Join(repo, hooksPath)
+			}
+			runFixtureGit(t, repo, "config", "core.hooksPath", hooksPath)
+			t.Chdir(repo)
+			_, err := WrapCommandLinuxWithOptions(&config.Config{}, "true", nil, nil, nil, nil, nil, "", LinuxSandboxOptions{})
+			if err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("replaceable hooks symlink was not rejected: %v", err)
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("rejected hooks path changed its external target: %v", entries)
+			}
+		})
+	}
+}
+
 func TestGitProtection_RejectsConditionalIncludes(t *testing.T) {
 	seedGreyproxyDir(t)
 	repo := t.TempDir()

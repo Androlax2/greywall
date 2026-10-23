@@ -178,7 +178,7 @@ func TestGreyproxyAPICalls_SendNoTokenWhenGreyproxyHasNone(t *testing.T) {
 
 func TestGreyproxyAPICalls_FailWhenTheTokenFileIsReadableByOthers(t *testing.T) {
 	dataDir := useGreyproxyDataDir(t, testAPIToken)
-	if err := os.Chmod(filepath.Join(dataDir, "api-token"), 0o644); err != nil {
+	if err := os.Chmod(filepath.Join(dataDir, "api-token"), 0o644); err != nil { // #nosec G302 -- deliberately insecure fixture verifies that registration rejects readable tokens
 		t.Fatal(err)
 	}
 	server, calls := fakeGreyproxyAPI(t)
