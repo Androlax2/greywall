@@ -39,6 +39,9 @@ type Config struct {
 	// ignored. If the bundled profile drifts to a different delta, this hash
 	// no longer matches and the prompt reappears.
 	DriftAckHash string `json:"driftAckHash,omitempty"`
+	// PreserveEnvGlobException keeps a reviewed omission of the bundled .env.*
+	// deny during profile updates. It never removes explicit runtime denies.
+	PreserveEnvGlobException bool `json:"preserveEnvGlobException,omitempty"`
 }
 
 // CredentialConfig defines credential injection and protection settings.

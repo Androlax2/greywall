@@ -157,18 +157,20 @@ type profileFS struct {
 }
 
 type profileConfig struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	GeneratedBy   string    `json:"generatedBy,omitempty"`
-	Filesystem    profileFS `json:"filesystem"`
+	SchemaVersion            int       `json:"schemaVersion"`
+	GeneratedBy              string    `json:"generatedBy,omitempty"`
+	PreserveEnvGlobException bool      `json:"preserveEnvGlobException,omitempty"`
+	Filesystem               profileFS `json:"filesystem"`
 }
 
 // SaveAsTemplate serializes a profile config to disk so it auto-loads on
-// subsequent runs without prompting. Only filesystem paths are persisted,
-// matching the format produced by --learning.
+// subsequent runs without prompting. It persists filesystem paths and profile
+// review metadata, not runtime network or credential settings.
 func SaveAsTemplate(cfg *config.Config, cmdName string, debug bool) error {
 	p := profileConfig{
-		SchemaVersion: config.CurrentSchemaVersion,
-		GeneratedBy:   sandbox.GreywallVersion(),
+		SchemaVersion:            config.CurrentSchemaVersion,
+		GeneratedBy:              sandbox.GreywallVersion(),
+		PreserveEnvGlobException: cfg.PreserveEnvGlobException,
 		Filesystem: profileFS{
 			AllowRead:  nonNil(cfg.Filesystem.AllowRead),
 			AllowWrite: nonNil(cfg.Filesystem.AllowWrite),

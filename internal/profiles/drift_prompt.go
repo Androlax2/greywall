@@ -99,7 +99,7 @@ func renderDriftDiffs(out io.Writer, learned, bundled *config.Config) {
 		fmt.Fprintln(out, "[greywall:profile]   (diff unavailable: missing profile data)")
 		return
 	}
-	merged := config.Merge(bundled, learned)
+	merged := mergeBundledProfile(learned, bundled)
 
 	mergeDiff := DiffConfigs(learned, merged)
 	fmt.Fprintln(out, "[greywall:profile]")

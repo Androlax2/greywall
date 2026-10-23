@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/GreyhavenHQ/greywall/internal/config"
 )
 
 func TestSanitizeTemplateName(t *testing.T) {
@@ -370,7 +373,7 @@ func TestListLearnedTemplates(t *testing.T) {
 func TestBuildTemplate(t *testing.T) {
 	allowRead := []string{"~/external-data"}
 	allowWrite := []string{".", "~/.cache/opencode", "~/.config/opencode"}
-	result := buildTemplate("opencode", allowRead, allowWrite)
+	result := buildTemplate("opencode", allowRead, allowWrite, nil)
 
 	// Check header comments
 	if !strings.Contains(result, `Learned profile for "opencode"`) {
@@ -406,16 +409,49 @@ func TestBuildTemplate(t *testing.T) {
 	if !strings.Contains(result, `".env"`) {
 		t.Error("template missing .env in denyRead")
 	}
-	if strings.Contains(result, `".env.*"`) {
-		t.Error("generated template must not mask arbitrary env examples")
+	if !strings.Contains(result, `".env.*"`) {
+		t.Error("generic learned template lost its default env deny")
 	}
-	if !strings.Contains(result, `".env.production"`) {
-		t.Error("generated template must still mask known sensitive env files")
+}
+
+func TestGenerateLearnedTemplatePreservesReviewedEnvException(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing string
+		marker   bool
+		wantGlob bool
+	}{
+		{"generic default", "", false, true},
+		{"reviewed omission", `{"preserveEnvGlobException":true,"filesystem":{"denyRead":[".env"]}}`, true, false},
+		{"explicit deny", `{"preserveEnvGlobException":true,"filesystem":{"denyRead":[".env.*"]}}`, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			if tc.existing != "" {
+				if err := os.MkdirAll(LearnedTemplateDir(), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(LearnedTemplatePath("claude"), []byte(tc.existing), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path, err := GenerateLearnedTemplate(&TraceResult{}, "claude", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.PreserveEnvGlobException != tc.marker || slices.Contains(saved.Filesystem.DenyRead, ".env.*") != tc.wantGlob {
+				t.Fatalf("regeneration changed reviewed env policy: %+v", saved)
+			}
+		})
 	}
 }
 
 func TestBuildTemplateNoAllowRead(t *testing.T) {
-	result := buildTemplate("simple-cmd", nil, []string{"."})
+	result := buildTemplate("simple-cmd", nil, []string{"."}, nil)
 
 	// When allowRead is nil, it should be omitted from JSON
 	if strings.Contains(result, `"allowRead"`) {

@@ -12,7 +12,7 @@ import (
 // ApplyDriftAction executes the user's choice on a drifted learned profile.
 //
 //   - ActionSkip: no-op, returns learned unchanged. Re-prompts next run.
-//   - ActionMerge: returns config.Merge(bundled, learned) and rewrites the
+//   - ActionMerge: merges bundled additions, honoring reviewed exceptions, and rewrites the
 //     learned file on disk with the merged result, backing up the original to
 //     <path>.bak. Merge is union-based so user customizations are preserved.
 //   - ActionKeep: rewrites the learned file with the current drift hash
@@ -26,7 +26,7 @@ func ApplyDriftAction(action DriftAction, learned, bundled *config.Config, cmdNa
 		return learned, nil
 
 	case ActionMerge:
-		merged := config.Merge(bundled, learned)
+		merged := mergeBundledProfile(learned, bundled)
 		if err := rewriteLearnedFile(cmdName, merged); err != nil {
 			return nil, err
 		}

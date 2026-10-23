@@ -64,6 +64,7 @@ func BaseProfile() *config.Config {
 				"~/.ssh/id_*",
 				"~/.gnupg/**",
 				".env",
+				".env.*",
 			},
 			DenyWrite: []string{
 				"~/.bashrc",

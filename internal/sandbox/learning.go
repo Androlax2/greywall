@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -174,11 +175,14 @@ func GenerateLearnedTemplate(result *TraceResult, cmdName string, debug bool) (s
 
 	fmt.Fprintf(os.Stderr, "\n")
 
-	// Build profile
-	template := buildTemplate(cmdName, allowRead, allowWrite)
+	templatePath := LearnedTemplatePath(cmdName)
+	reviewed, err := config.Load(templatePath)
+	if err != nil {
+		return "", fmt.Errorf("read existing profile before regeneration: %w", err)
+	}
+	template := buildTemplate(cmdName, allowRead, allowWrite, reviewed)
 
 	// Save profile
-	templatePath := LearnedTemplatePath(cmdName)
 	if err := os.MkdirAll(filepath.Dir(templatePath), 0o750); err != nil {
 		return "", fmt.Errorf("failed to create profile directory: %w", err)
 	}
@@ -421,7 +425,7 @@ func removeDuplicates(paths []string) []string {
 
 // getSensitiveProjectDenyPatterns returns denyRead entries for sensitive project files.
 func getSensitiveProjectDenyPatterns() []string {
-	return append([]string(nil), SensitiveProjectFiles...)
+	return []string{".env", ".env.*"}
 }
 
 // GreywallVersion is set from main via SetGreywallVersion so learned profiles
@@ -441,7 +445,7 @@ func GreywallVersion() string {
 }
 
 // buildTemplate generates the JSONC profile content for a learned config.
-func buildTemplate(cmdName string, allowRead, allowWrite []string) string {
+func buildTemplate(cmdName string, allowRead, allowWrite []string, reviewed *config.Config) string {
 	type fsConfig struct {
 		AllowRead  []string `json:"allowRead,omitempty"`
 		AllowWrite []string `json:"allowWrite"`
@@ -449,17 +453,28 @@ func buildTemplate(cmdName string, allowRead, allowWrite []string) string {
 		DenyRead   []string `json:"denyRead"`
 	}
 	type templateConfig struct {
-		SchemaVersion int      `json:"schemaVersion"`
-		GeneratedBy   string   `json:"generatedBy,omitempty"`
-		Filesystem    fsConfig `json:"filesystem"`
+		SchemaVersion            int      `json:"schemaVersion"`
+		GeneratedBy              string   `json:"generatedBy,omitempty"`
+		PreserveEnvGlobException bool     `json:"preserveEnvGlobException,omitempty"`
+		Filesystem               fsConfig `json:"filesystem"`
 	}
 
 	// Combine sensitive read patterns with .env project patterns
 	denyRead := append(getSensitiveReadPatterns(), getSensitiveProjectDenyPatterns()...)
+	preserveException := reviewed != nil && reviewed.PreserveEnvGlobException
+	if preserveException && !slices.Contains(reviewed.Filesystem.DenyRead, ".env.*") {
+		denyRead = slices.DeleteFunc(denyRead, func(pattern string) bool { return pattern == ".env.*" })
+		for _, path := range SensitiveProjectFiles {
+			if !slices.Contains(denyRead, path) {
+				denyRead = append(denyRead, path)
+			}
+		}
+	}
 
 	cfg := templateConfig{
-		SchemaVersion: config.CurrentSchemaVersion,
-		GeneratedBy:   greywallVersion,
+		SchemaVersion:            config.CurrentSchemaVersion,
+		GeneratedBy:              greywallVersion,
+		PreserveEnvGlobException: preserveException,
 		Filesystem: fsConfig{
 			AllowRead:  allowRead,
 			AllowWrite: allowWrite,
