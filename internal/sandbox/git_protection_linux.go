@@ -60,6 +60,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 		root = parent
 	}
 	var anchors, protected []string
+	readOnlyRepository := isWriteDenied(cfg, root)
 	pinParents := func(path string) {
 		for grant := range writable {
 			if isSameOrUnder(path, grant) {
@@ -119,27 +120,33 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 		}
 		seen[resolved] = true
 		anchors = append(anchors, resolved)
-		// A missing commondir is equivalent to this directory. Reserve that
-		// meaning so the sandbox cannot introduce a different common config.
-		commonPointer, err := os.OpenFile(filepath.Join(resolved, "commondir"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G703 -- fixed metadata name in the canonical Git directory; exclusive creation preserves existing data
-		if err == nil {
-			_, writeErr := commonPointer.WriteString(".\n")
-			closeErr := commonPointer.Close()
-			if err := errors.Join(writeErr, closeErr); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("prepare Git common directory pointer: %w", err)
+		readOnly := readOnlyRepository || isWriteDenied(cfg, resolved) || (worktree != "" && isWriteDenied(cfg, worktree))
+		if readOnly {
+			protected = append(protected, resolved)
 		}
-		// A repository may already enable extensions.worktreeConfig while the
-		// per-worktree file is still absent. Reserve it before sandbox startup.
-		placeholder, err := os.OpenFile(filepath.Join(resolved, "config.worktree"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G703 -- linked-worktree metadata may be external; exclusive creation preserves existing config
-		if err == nil {
-			if err := placeholder.Close(); err != nil {
-				return err
+		if !readOnly {
+			// A missing commondir is equivalent to this directory. Reserve that
+			// meaning so the sandbox cannot introduce a different common config.
+			commonPointer, err := os.OpenFile(filepath.Join(resolved, "commondir"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G703 -- fixed metadata name in the canonical Git directory; exclusive creation preserves existing data
+			if err == nil {
+				_, writeErr := commonPointer.WriteString(".\n")
+				closeErr := commonPointer.Close()
+				if err := errors.Join(writeErr, closeErr); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("prepare Git common directory pointer: %w", err)
 			}
-		} else if !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("prepare Git worktree config: %w", err)
+			// A repository may already enable extensions.worktreeConfig while the
+			// per-worktree file is still absent. Reserve it before sandbox startup.
+			placeholder, err := os.OpenFile(filepath.Join(resolved, "config.worktree"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G703 -- linked-worktree metadata may be external; exclusive creation preserves existing config
+			if err == nil {
+				if err := placeholder.Close(); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("prepare Git worktree config: %w", err)
+			}
 		}
 		for _, name := range []string{"config", "config.worktree", "commondir", "gitdir"} {
 			path := filepath.Join(resolved, name)
@@ -152,10 +159,16 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 			}
 		}
 		hooks := filepath.Join(resolved, "hooks")
-		if err := os.MkdirAll(hooks, 0o700); err != nil { // #nosec G703 -- reserves the canonical Git directory's hooks path before the sandbox can create it
-			return fmt.Errorf("prepare Git hooks directory: %w", err)
+		if !readOnly {
+			if err := os.MkdirAll(hooks, 0o700); err != nil { // #nosec G703 -- reserves the canonical Git directory's hooks path before the sandbox can create it
+				return fmt.Errorf("prepare Git hooks directory: %w", err)
+			}
 		}
-		if err := protect(hooks); err != nil {
+		if _, err := os.Lstat(hooks); err == nil { // #nosec G703 -- fixed hooks name in the canonical metadata directory; does not follow symlinks
+			if err := protect(hooks); err != nil {
+				return err
+			}
+		} else if !readOnly || !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		if worktree != "" {
@@ -184,11 +197,20 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 					if err := checkGitSymlinkChain(custom, writable, true); err != nil {
 						return fmt.Errorf("validate core.hooksPath: %w", err)
 					}
-					if err := os.MkdirAll(custom, 0o700); err != nil { // #nosec G703 -- validates existing ancestors before reserving the configured external hooks path
-						return fmt.Errorf("prepare core.hooksPath: %w", err)
+					if !readOnly && !isWriteDenied(cfg, custom) {
+						if err := os.MkdirAll(custom, 0o700); err != nil { // #nosec G703 -- validates existing ancestors before reserving the configured external hooks path
+							return fmt.Errorf("prepare core.hooksPath: %w", err)
+						}
 					}
-					if err := protect(custom); err != nil {
+					isHooksParentReadOnly := (readOnlyRepository && isSameOrUnder(custom, root)) || (readOnly && isSameOrUnder(custom, resolved))
+					if _, err := os.Lstat(custom); err == nil { // #nosec G703 -- configured hooks path was validated above; inspect without following symlinks
+						if err := protect(custom); err != nil {
+							return err
+						}
+					} else if !errors.Is(err, os.ErrNotExist) {
 						return err
+					} else if !isHooksParentReadOnly {
+						return fmt.Errorf("cannot protect missing external core.hooksPath without host writes: %s", custom)
 					}
 				}
 			} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {

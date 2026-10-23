@@ -17,6 +17,9 @@ import (
 // startupConfigProtectionArgs reserves project-local startup paths before
 // sandboxing. Placeholders persist on the host; existing contents are preserved.
 func startupConfigProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, error) {
+	if isWriteDenied(cfg, cwd) {
+		return nil, []string{"--ro-bind", cwd, cwd}, nil
+	}
 	root, err := unix.Open(cwd, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, nil, err
@@ -72,6 +75,24 @@ func startupConfigProtectionArgs(cfg *config.Config, cwd string) ([]string, []st
 		readOnly = append(readOnly, "--ro-bind", path, path)
 	}
 	return parents, readOnly, nil
+}
+
+func isWriteDenied(cfg *config.Config, path string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, denied := range ExpandGlobPatterns(cfg.Filesystem.DenyWrite) {
+		if isSameOrUnder(path, denied) {
+			return true
+		}
+	}
+	for _, pattern := range cfg.Filesystem.DenyWrite {
+		denied := NormalizePath(pattern)
+		if !ContainsGlobChars(denied) && isSameOrUnder(path, denied) {
+			return true
+		}
+	}
+	return false
 }
 
 // Parent mounts must precede every protected leaf, across both Git and startup
