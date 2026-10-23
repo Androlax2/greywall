@@ -59,7 +59,8 @@ jobs:
 
   test-linux:
     name: Test (Linux)
-    runs-on: ubuntu-latest
+    # Ubuntu 26's unpriv_bwrap profile denies the namespace capabilities under test.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -100,10 +101,6 @@ jobs:
           # Configure subuid/subgid for the runner user (required for unprivileged user namespaces)
           echo "$(whoami):100000:65536" | sudo tee -a /etc/subuid
           echo "$(whoami):100000:65536" | sudo tee -a /etc/subgid
-          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor.
-          # Disable the restriction so bwrap can create namespaces without setuid.
-          # (Setuid mode disallows --cap-add for non-root, which greywall needs for transparent proxy.)
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Verify sandbox dependencies
         run: |
