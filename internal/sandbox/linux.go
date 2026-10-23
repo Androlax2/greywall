@@ -1173,10 +1173,10 @@ func isSystemMountPoint(path string) bool {
 }
 
 // WrapCommandLinux wraps a command with Linux bubblewrap sandbox.
-// It uses available security features (Landlock, seccomp) with graceful fallback.
+// Requested security features must be available; failures abort startup.
 func WrapCommandLinux(cfg *config.Config, command string, proxyBridge *ProxyBridge, dnsBridge *DnsBridge, reverseBridge *ReverseBridge, forwardBridge *ForwardBridge, dbusBridge *DbusBridge, tun2socksPath string, debug bool) (string, error) {
 	return WrapCommandLinuxWithOptions(cfg, command, proxyBridge, dnsBridge, reverseBridge, forwardBridge, dbusBridge, tun2socksPath, LinuxSandboxOptions{
-		UseLandlock: true, // Enabled by default, will fall back if not available
+		UseLandlock: true,
 		UseSeccomp:  true, // Enabled by default
 		UseEBPF:     true, // Enabled by default if available
 		Debug:       debug,
@@ -1205,6 +1205,12 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 
 	cwd, _ := os.Getwd()
 	features := DetectLinuxFeatures()
+	if opts.UseSeccomp && !features.HasSeccomp {
+		return "", fmt.Errorf("refusing to start: requested seccomp is unavailable")
+	}
+	if opts.UseLandlock && !features.CanUseLandlock() {
+		return "", fmt.Errorf("refusing to start: requested Landlock is unavailable")
+	}
 
 	if opts.Debug {
 		fmt.Fprintf(os.Stderr, "[greywall:linux] Available features: %s\n", features.Summary())
@@ -1222,25 +1228,19 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	// mitigates is instead blocked by our seccomp filter (see linux_seccomp.go).
 	bwrapArgs = append(bwrapArgs, "--die-with-parent")
 
-	// Always use --unshare-net when available (network namespace isolation)
-	// Inside the namespace, tun2socks will provide transparent proxy access
-	if features.CanUnshareNet {
-		bwrapArgs = append(bwrapArgs, "--unshare-net") // Network namespace isolation
-	} else if opts.Debug {
-		fmt.Fprintf(os.Stderr, "[greywall:linux] Skipping --unshare-net (network namespace unavailable in this environment)\n")
-	}
+	// The probe informs proxy setup, not whether isolation is optional. Let
+	// bubblewrap fail with its actual error rather than share the host network.
+	bwrapArgs = append(bwrapArgs, "--unshare-net")
 
 	bwrapArgs = append(bwrapArgs, "--unshare-pid") // PID namespace isolation
 
 	// Generate seccomp filter if available and requested
 	var seccompFilterPath string
-	if opts.UseSeccomp && features.HasSeccomp {
+	if opts.UseSeccomp {
 		filter := NewSeccompFilter(opts.Debug)
 		filterPath, err := filter.GenerateBPFFilter()
 		if err != nil {
-			if opts.Debug {
-				fmt.Fprintf(os.Stderr, "[greywall:linux] Seccomp filter generation failed: %v\n", err)
-			}
+			return "", fmt.Errorf("refusing to start: generate seccomp filter: %w", err)
 		} else {
 			seccompFilterPath = filterPath
 			if opts.Debug {

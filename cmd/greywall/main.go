@@ -1441,10 +1441,8 @@ parseCommand:
 		// Apply Landlock restrictions
 		err = sandbox.ApplyLandlockFromConfig(cfg, cwd, nil, masked, debugMode)
 		if err != nil {
-			if debugMode {
-				fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] Warning: Landlock not applied: %v\n", err)
-			}
-			// Continue without Landlock - bwrap still provides isolation
+			fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] refusing to start: %v\n", err)
+			os.Exit(1)
 		} else if debugMode {
 			fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] Landlock restrictions applied\n")
 		}

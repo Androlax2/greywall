@@ -18,23 +18,16 @@ import (
 
 // ApplyLandlockFromConfig creates and applies Landlock restrictions based on config.
 // This should be called before exec'ing the sandboxed command.
-// Returns nil if Landlock is not available (graceful fallback).
+// Returns an error if Landlock cannot be enforced.
 func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []string, masked MaskedPaths, debug bool) error {
 	features := DetectLinuxFeatures()
 	if !features.CanUseLandlock() {
-		if debug {
-			fmt.Fprintf(os.Stderr, "[greywall:landlock] Not available (kernel %d.%d < 5.13), skipping\n",
-				features.KernelMajor, features.KernelMinor)
-		}
-		return nil // Graceful fallback - Landlock not available
+		return fmt.Errorf("Landlock is unavailable")
 	}
 
 	ruleset, err := NewLandlockRuleset(debug)
 	if err != nil {
-		if debug {
-			fmt.Fprintf(os.Stderr, "[greywall:landlock] Failed to create ruleset: %v\n", err)
-		}
-		return nil // Graceful fallback
+		return fmt.Errorf("create Landlock ruleset: %w", err)
 	}
 	defer func() { _ = ruleset.Close() }()
 
@@ -45,10 +38,7 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 	}
 
 	if err := ruleset.Initialize(); err != nil {
-		if debug {
-			fmt.Fprintf(os.Stderr, "[greywall:landlock] Failed to initialize: %v\n", err)
-		}
-		return nil // Graceful fallback
+		return fmt.Errorf("initialize Landlock ruleset: %w", err)
 	}
 
 	// Essential system paths - allow read+execute
@@ -173,10 +163,7 @@ func ApplyLandlockFromConfig(cfg *config.Config, cwd string, socketPaths []strin
 
 	// Apply the ruleset
 	if err := ruleset.Apply(); err != nil {
-		if debug {
-			fmt.Fprintf(os.Stderr, "[greywall:landlock] Failed to apply: %v\n", err)
-		}
-		return nil // Graceful fallback
+		return fmt.Errorf("apply Landlock ruleset: %w", err)
 	}
 
 	if debug {
