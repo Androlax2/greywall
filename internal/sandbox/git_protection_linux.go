@@ -19,7 +19,7 @@ import (
 // makes config, hooks and worktree pointers read-only. Git's index, refs and
 // object database remain writable. Missing hooks directories are deliberately
 // created on the host so future hooks cannot appear behind an absent mount.
-func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, error) {
+func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, error) {
 	writable := make(map[string]bool)
 	if cfg != nil && cfg.Filesystem.IsDefaultDenyRead() {
 		writable[cwd] = true
@@ -51,11 +51,11 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, error) {
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("inspect Git metadata: %w", err)
+			return nil, nil, fmt.Errorf("inspect Git metadata: %w", err)
 		}
 		parent := filepath.Dir(root)
 		if parent == root {
-			return nil, nil
+			return nil, nil, nil
 		}
 		root = parent
 	}
@@ -335,17 +335,17 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, error) {
 	}
 	gitDir := filepath.Join(root, ".git")
 	if info, err := os.Lstat(gitDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	} else if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("refusing replaceable symlinked Git directory: %s", gitDir)
+		return nil, nil, fmt.Errorf("refusing replaceable symlinked Git directory: %s", gitDir)
 	} else if !info.IsDir() {
 		gitDir, err = readGitDirPointer(gitDir)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if err := repositories(root, gitDir); err != nil {
-		return nil, fmt.Errorf("protect Git metadata: %w", err)
+		return nil, nil, fmt.Errorf("protect Git metadata: %w", err)
 	}
 	// Pinning must not turn an ancestor of cwd or an external Git directory
 	// into a new write grant. Reapply existing writable descendants after
@@ -373,18 +373,18 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, error) {
 	sort.Slice(ordered, func(i, j int) bool {
 		return len(ordered[i]) < len(ordered[j])
 	})
-	var args []string
+	var parents, readOnly []string
 	for _, path := range ordered {
-		args = append(args, paths[path], path, path)
+		parents = append(parents, paths[path], path, path)
 	}
 	for _, path := range protected {
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		args = append(args, "--ro-bind", resolved, resolved)
+		readOnly = append(readOnly, "--ro-bind", resolved, resolved)
 	}
-	return args, nil
+	return parents, readOnly, nil
 }
 
 func readGitDirPointer(path string) (string, error) {
