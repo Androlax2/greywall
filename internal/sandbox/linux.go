@@ -1262,9 +1262,9 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	}
 
 	// Mount special filesystems
-	// Use --dev-bind for /dev instead of --dev to preserve host device permissions
-	// (the --dev minimal devtmpfs has permission issues when bwrap is setuid)
-	bwrapArgs = append(bwrapArgs, "--dev-bind", "/dev", "/dev")
+	// A host /dev bind exposes other terminals, shared memory and desktop
+	// devices. Use bubblewrap's private device tree; tun is bound separately.
+	bwrapArgs = append(bwrapArgs, "--dev", "/dev")
 	bwrapArgs = append(bwrapArgs, "--proc", "/proc")
 
 	// /tmp needs to be writable for many programs
