@@ -406,8 +406,11 @@ func TestBuildTemplate(t *testing.T) {
 	if !strings.Contains(result, `".env"`) {
 		t.Error("template missing .env in denyRead")
 	}
-	if !strings.Contains(result, `".env.*"`) {
-		t.Error("template missing .env.* in denyRead")
+	if strings.Contains(result, `".env.*"`) {
+		t.Error("generated template must not mask arbitrary env examples")
+	}
+	if !strings.Contains(result, `".env.production"`) {
+		t.Error("generated template must still mask known sensitive env files")
 	}
 }
 

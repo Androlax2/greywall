@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -133,16 +134,20 @@ func TestDetectDrift_Content(t *testing.T) {
 func TestPromptDriftResolution(t *testing.T) {
 	info := DriftInfo{HasDrift: true, Reason: DriftMissingStamp, CmdName: "chrome", RunningVersion: "v1.0.0"}
 	cases := map[string]DriftAction{
-		"\n":        ActionMerge, // default is merge
+		"\n":        ActionSkip,
 		"m\n":       ActionMerge,
 		"merge\n":   ActionMerge,
 		"k\n":       ActionKeep, // permanent keep
 		"keep\n":    ActionKeep,
 		"i\n":       ActionSkip,
 		"ignore\n":  ActionSkip,
-		"o\n":       ActionMerge, // unknown input falls through to default merge
-		"garbage\n": ActionMerge,
-		"":          ActionMerge, // EOF
+		"o\n":       ActionSkip,
+		"garbage\n": ActionSkip,
+		"maybe\n":   ActionSkip,
+		"":          ActionSkip,
+		"m":         ActionSkip,
+		"merge":     ActionSkip,
+		"k":         ActionSkip,
 	}
 	learned := &config.Config{}
 	bundled := &config.Config{}
@@ -152,6 +157,74 @@ func TestPromptDriftResolution(t *testing.T) {
 		if got != want {
 			t.Errorf("input %q: got %v want %v", input, got, want)
 		}
+	}
+}
+
+func TestDriftWithoutExplicitConsentPreservesReviewedProfile(t *testing.T) {
+	for _, input := range []string{"", "\n", "garbage\n", "maybe\n", "m", "merge", "k"} {
+		t.Run(input, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			learned := &config.Config{
+				SchemaVersion: config.CurrentSchemaVersion,
+				GeneratedBy:   "0.3.7",
+				DriftAckHash:  "reviewed-acknowledgment",
+				Filesystem: config.FilesystemConfig{
+					AllowWrite: []string{".", "~/.claude", "~/approved-by-host"},
+					DenyRead:   []string{".env"},
+				},
+			}
+			bundled := &config.Config{Filesystem: config.FilesystemConfig{
+				AllowWrite: []string{"~/.skills", "~/.agents", "~/AGENTS.md", "~/.config/gh", "~/.local/share/gh"},
+				DenyRead:   []string{".env.*"},
+			}}
+			path := sandbox.LearnedTemplatePath("claude")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			before, err := json.MarshalIndent(learned, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			action := promptDriftResolution(DriftInfo{HasDrift: true, CmdName: "claude"}, learned, bundled, strings.NewReader(input), &output)
+			if _, err := ApplyDriftAction(action, learned, bundled, "claude"); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("reviewed profile changed without explicit consent:\n%s", after)
+			}
+		})
+	}
+}
+
+func TestKeepReviewedProfilePreservesExplicitHostGrants(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.MkdirAll(sandbox.LearnedTemplateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	learned := &config.Config{Filesystem: config.FilesystemConfig{
+		AllowWrite: []string{".", "~/approved-by-host", "~/.config/gh"},
+		DenyRead:   []string{".env", "~/private-review"},
+	}}
+	bundled := &config.Config{Filesystem: config.FilesystemConfig{AllowWrite: []string{"~/.skills"}}}
+	ack := DriftHash(learned, bundled)
+	if _, err := ApplyDriftAction(ActionKeep, learned, bundled, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.Load(sandbox.LearnedTemplatePath("claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(saved.Filesystem.AllowWrite, []string{".", "~/approved-by-host", "~/.config/gh"}) ||
+		!slices.Equal(saved.Filesystem.DenyRead, []string{".env", "~/private-review"}) || saved.DriftAckHash != ack {
+		t.Fatalf("explicit reviewed policy or acknowledgment changed: %+v", saved)
 	}
 }
 

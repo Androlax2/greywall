@@ -37,7 +37,7 @@ func isInteractiveDrift() bool {
 }
 
 // PromptDriftResolution asks the user how to resolve profile drift. Returns
-// ActionKeep on any non-interactive condition, EOF, or unrecognized input.
+// ActionSkip on any non-interactive condition, EOF, or unrecognized input.
 // Writes the prompt to stderr and reads from stdin.
 //
 // learned and bundled are used to render diffs when the user picks [d].
@@ -67,28 +67,27 @@ func promptDriftResolution(info DriftInfo, learned, bundled *config.Config, in i
 	renderDriftDiffs(out, learned, bundled)
 
 	fmt.Fprintln(out, "[greywall:profile]")
-	fmt.Fprintln(out, "[greywall:profile]   [m] merge the template into my version (rewrites file, keeps .bak) (default)")
+	fmt.Fprintln(out, "[greywall:profile]   [m] merge the template into my version (rewrites file, keeps .bak)")
 	fmt.Fprintln(out, "[greywall:profile]   [k] keep my version (don't ask again unless template changes)")
-	fmt.Fprintln(out, "[greywall:profile]   [i] ignore just this time (ask again next run)")
-	fmt.Fprint(out, "[greywall:profile] Choice [m]: ")
+	fmt.Fprintln(out, "[greywall:profile]   [i] ignore just this time (ask again next run) (default)")
+	fmt.Fprint(out, "[greywall:profile] Choice [i]: ")
 
 	reader := bufio.NewReader(in)
 	line, err := reader.ReadString('\n')
-	if err != nil && line == "" {
+	if err != nil {
 		fmt.Fprintln(out)
-		return ActionMerge
+		return ActionSkip
 	}
 	line = strings.ToLower(strings.TrimSpace(line))
-	if line == "" {
+	switch line {
+	case "m", "merge":
 		return ActionMerge
-	}
-	switch line[0] {
-	case 'k':
+	case "k", "keep":
 		return ActionKeep
-	case 'i':
+	case "i", "ignore":
 		return ActionSkip
 	default:
-		return ActionMerge
+		return ActionSkip
 	}
 }
 

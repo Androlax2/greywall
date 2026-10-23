@@ -33,13 +33,8 @@ func BaseProfile() *config.Config {
 	}
 	allowWrite := []string{
 		".",
-		"~/.skills",
-		"~/.agents",
-		"~/AGENTS.md",
 		// SCM CLI state
-		"~/.config/gh",
 		"~/.cache/gh",
-		"~/.local/share/gh",
 		"~/.local/state/gh",
 		// SSH known_hosts
 		"~/.ssh/known_hosts",
@@ -69,7 +64,6 @@ func BaseProfile() *config.Config {
 				"~/.ssh/id_*",
 				"~/.gnupg/**",
 				".env",
-				".env.*",
 			},
 			DenyWrite: []string{
 				"~/.bashrc",

@@ -14,6 +14,7 @@ import (
 
 func overrideLinuxFeatures(t *testing.T) *LinuxFeatures {
 	t.Helper()
+	seedGreyproxyDir(t)
 	features := DetectLinuxFeatures()
 	original := *features
 	t.Cleanup(func() { *features = original })

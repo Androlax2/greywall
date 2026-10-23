@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,25 @@ import (
 	_ "github.com/GreyhavenHQ/greywall/internal/profiles/agents"     // register all agents
 	_ "github.com/GreyhavenHQ/greywall/internal/profiles/toolchains" // register all toolchains
 )
+
+func TestClaudeDefaultsDoNotWriteSharedPolicy(t *testing.T) {
+	profile := profiles.GetAgentProfile("claude")
+	for _, target := range []string{"~/.skills", "~/.agents", "~/AGENTS.md", "~/.config/gh", "~/.local/share/gh"} {
+		for _, grant := range profile.Filesystem.AllowWrite {
+			if target == grant || strings.HasPrefix(target, strings.TrimSuffix(grant, "/")+"/") {
+				t.Errorf("bundled Claude grants %q, exposing shared policy %q", grant, target)
+			}
+		}
+	}
+}
+
+func TestClaudeDefaultsDoNotMaskEnvExamples(t *testing.T) {
+	for _, pattern := range profiles.GetAgentProfile("claude").Filesystem.DenyRead {
+		if matches, _ := path.Match(pattern, ".env.example"); matches {
+			t.Errorf("bundled denyRead %q hides legitimate env examples", pattern)
+		}
+	}
+}
 
 func TestIsKnownAgent(t *testing.T) {
 	tests := []struct {

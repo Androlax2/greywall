@@ -421,10 +421,7 @@ func removeDuplicates(paths []string) []string {
 
 // getSensitiveProjectDenyPatterns returns denyRead entries for sensitive project files.
 func getSensitiveProjectDenyPatterns() []string {
-	return []string{
-		".env",
-		".env.*",
-	}
+	return append([]string(nil), SensitiveProjectFiles...)
 }
 
 // GreywallVersion is set from main via SetGreywallVersion so learned profiles
