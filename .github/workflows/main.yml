@@ -142,12 +142,16 @@ jobs:
           for setting in /proc/sys/kernel/apparmor_restrict_*; do
             [ -f "$setting" ] || continue
             printf '%s: ' "$setting"
-            cat "$setting"
+            if ! sudo cat "$setting"; then
+              echo "Could not read this diagnostic setting; continuing."
+            fi
           done
           for profile in /etc/apparmor.d/bwrap /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/unshare; do
             [ -f "$profile" ] || continue
             printf '\n%s\n' "$profile"
-            sudo cat "$profile"
+            if ! sudo cat "$profile"; then
+              echo "Could not read this diagnostic profile; continuing."
+            fi
           done
           if ! bwrap --unshare-net --ro-bind / / --dev /dev --proc /proc \
             --cap-drop ALL --cap-add CAP_SYS_ADMIN --cap-add CAP_SETPCAP \
