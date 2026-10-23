@@ -134,6 +134,34 @@ jobs:
           test -c /dev/net/tun
           go test -race ./internal/sandbox -run '^TestNetworkHelpers_' -count=1 -v
 
+      - name: Diagnose network startup failures
+        if: failure()
+        run: |
+          bwrap --version
+          unshare --version
+          for setting in /proc/sys/kernel/apparmor_restrict_*; do
+            [ -f "$setting" ] || continue
+            printf '%s: ' "$setting"
+            cat "$setting"
+          done
+          for profile in /etc/apparmor.d/bwrap /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/unshare; do
+            [ -f "$profile" ] || continue
+            printf '\n%s\n' "$profile"
+            sudo cat "$profile"
+          done
+          if ! bwrap --unshare-net --ro-bind / / --dev /dev --proc /proc \
+            --cap-drop ALL --cap-add CAP_SYS_ADMIN --cap-add CAP_SETPCAP \
+            --cap-add CAP_NET_ADMIN --cap-add CAP_NET_BIND_SERVICE \
+            -- bash -c '
+              grep -E "^(Uid|Gid|CapPrm|CapEff|CapAmb):" /proc/self/status
+              cat /proc/self/uid_map
+              cat /proc/self/attr/current || true
+              unshare --net -- ip -o link show
+            '; then
+            echo "Namespace capability canary failed; original network test failure remains fatal."
+          fi
+          sudo journalctl -k --no-pager -n 200 | grep -Ei 'apparmor|denied' || true
+
       - name: Run unit and integration tests
         run: make test-ci
 
