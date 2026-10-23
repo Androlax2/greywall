@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,11 +26,9 @@ func TestClaudeDefaultsDoNotWriteSharedPolicy(t *testing.T) {
 	}
 }
 
-func TestClaudeDefaultsDoNotMaskEnvExamples(t *testing.T) {
-	for _, pattern := range profiles.GetAgentProfile("claude").Filesystem.DenyRead {
-		if matches, _ := path.Match(pattern, ".env.example"); matches {
-			t.Errorf("bundled denyRead %q hides legitimate env examples", pattern)
-		}
+func TestGenericProfilesRetainEnvGlobByDefault(t *testing.T) {
+	if !slices.Contains(profiles.BaseProfile().Filesystem.DenyRead, ".env.*") {
+		t.Fatal("generic default denies weakened instead of preserving a scoped exception")
 	}
 }
 

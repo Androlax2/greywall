@@ -157,6 +157,12 @@ Running `--learning` again overwrites the existing profile for that command:
 greywall --learning -- opencode
 ```
 
+The saved `preserveEnvGlobException` review marker is retained. If it is enabled
+and the saved profile omits `.env.*`, re-learning keeps that omission while
+retaining the named sensitive-env-file denies. An explicit saved `.env.*` deny
+is not removed. Invalid existing profiles stop regeneration rather than losing
+their review metadata. Other learned paths are still replaced by the new trace.
+
 ### Using profiles across commands
 
 If multiple commands need the same permissions, use `--profile`:

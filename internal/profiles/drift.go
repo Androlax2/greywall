@@ -3,6 +3,7 @@ package profiles
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 
 	"github.com/GreyhavenHQ/greywall/internal/config"
 )
@@ -10,8 +11,22 @@ import (
 // driftDiffText returns the exact diff text that merging bundled into learned
 // would produce. Used both for display and for acknowledgment hashing.
 func driftDiffText(learned, bundled *config.Config) string {
-	merged := config.Merge(bundled, learned)
+	merged := mergeBundledProfile(learned, bundled)
 	return DiffConfigs(learned, merged)
+}
+
+func mergeBundledProfile(learned, bundled *config.Config) *config.Config {
+	if learned == nil || bundled == nil || !learned.PreserveEnvGlobException {
+		return config.Merge(bundled, learned)
+	}
+	// Filter the bundled addition only; an explicit learned deny still wins.
+	base := *bundled
+	base.Filesystem.DenyRead = slices.DeleteFunc(slices.Clone(bundled.Filesystem.DenyRead), func(pattern string) bool {
+		return pattern == ".env.*"
+	})
+	merged := config.Merge(&base, learned)
+	merged.PreserveEnvGlobException = true
+	return merged
 }
 
 // DriftHash computes a stable hash of the drift delta between learned and

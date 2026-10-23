@@ -30,6 +30,32 @@ Example config:
 }
 ```
 
+## Reviewed saved-profile env exception
+
+Generic profiles deny `.env.*`. A reviewed saved profile in the learned-profile
+directory can explicitly preserve its omission of that bundled rule:
+
+```json
+{
+  "preserveEnvGlobException": true,
+  "filesystem": {
+    "denyRead": [".env", "~/.ssh/id_*"]
+  }
+}
+```
+
+This is profile-update metadata, not a runtime read grant. It prevents drift
+merges from adding the bundled `.env.*` entry; the displayed diff and drift hash
+use the same exception. It survives profile saves, acknowledgment and re-learning.
+An explicit `.env.*` in the saved profile still wins, as do all global and
+launcher deny rules. Other bundled denies are unchanged.
+
+Enable it only after reviewing the narrower policy. It does not decide whether
+a template is committed or safe: launcher protections for modified/untracked env
+files and the sandbox's named sensitive-file masks remain necessary.
+Install a build supporting this switch before enabling it; older builds ignore
+unknown profile fields.
+
 ## Config Inheritance
 
 You can extend built-in templates or other config files using the `extends` field. This reduces boilerplate by inheriting settings from a base and only specifying your overrides.
