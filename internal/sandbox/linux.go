@@ -1327,6 +1327,11 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		// Deduplicate
 		seen := make(map[string]bool)
 		for _, p := range mandatoryDeny {
+			// bubblewrap cannot mount onto a symlink. Protect the actual file,
+			// including when an allowWrite bind exposes its parent directory.
+			if resolved, err := filepath.EvalSymlinks(p); err == nil {
+				p = resolved
+			}
 			if !seen[p] && fileExists(p) && !maskedPaths[p] {
 				seen[p] = true
 				bwrapArgs = append(bwrapArgs, "--ro-bind", p, p)
