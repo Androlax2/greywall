@@ -3,9 +3,14 @@
 package sandbox
 
 import (
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -655,36 +660,65 @@ func TestLinux_ForwardBridgeConnectsToHost(t *testing.T) {
 	skipIfCommandNotFound(t, "socat")
 	skipIfCommandNotFound(t, "curl")
 
-	// Start a simple HTTP server on a random port using socat
-	// socat will respond with a fixed string to any connection
 	workspace := createTempWorkspace(t)
 	cfg := testConfigWithWorkspace(workspace)
-	cfg.Network.ForwardPorts = []int{19999}
+	port := startForwardHTTPFixture(t)
+	cfg.Network.ForwardPorts = []int{port}
 
-	// Start a listener on port 19999 that responds with "FORWARD_OK"
-	listener := exec.Command(
-		"socat", //nolint:gosec
-		"TCP-LISTEN:19999,fork,reuseaddr",
-		`EXEC:'echo HTTP/1.0 200 OK\r\n\r\nFORWARD_OK'`,
-	)
-	if err := listener.Start(); err != nil {
-		t.Fatalf("failed to start test listener: %v", err)
-	}
-	defer func() {
-		_ = listener.Process.Kill()
-		_ = listener.Wait()
-	}()
-
-	// Give listener time to start
-	time.Sleep(200 * time.Millisecond)
-
-	// Run curl inside the sandbox targeting localhost:19999
 	result := runUnderSandboxWithTimeout(t, cfg,
-		"curl -s --connect-timeout 3 --max-time 5 http://localhost:19999",
+		"curl -s --connect-timeout 3 --max-time 5 http://127.0.0.1:"+strconv.Itoa(port),
 		workspace, 15*time.Second)
-
 	assertAllowed(t, result)
 	assertContains(t, result.Stdout, "FORWARD_OK")
+}
+
+func startForwardHTTPFixture(t *testing.T) int {
+	t.Helper()
+	// The old echo child responded and exited without waiting for a request.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "FORWARD_OK")
+	}))
+	t.Cleanup(server.Close)
+	return server.Listener.Addr().(*net.TCPAddr).Port
+}
+
+func TestForwardHTTPFixture_WaitsForRequest(t *testing.T) {
+	port := startForwardHTTPFixture(t)
+	connection, err := net.DialTimeout("tcp4", "127.0.0.1:"+strconv.Itoa(port), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.Close() }()
+	if err := connection.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var buffer [1]byte
+	count, err := connection.Read(buffer[:])
+	if count != 0 {
+		t.Fatal("HTTP fixture sent a response before receiving a request")
+	}
+	if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("HTTP fixture closed before receiving a request: %v", err)
+	}
+}
+
+func TestForwardHTTPFixture_UsesIndependentListeners(t *testing.T) {
+	first, second := startForwardHTTPFixture(t), startForwardHTTPFixture(t)
+	if first == second {
+		t.Fatal("HTTP fixtures share a fixed port")
+	}
+	client := &http.Client{Timeout: time.Second}
+	for _, port := range []int{first, second} {
+		response, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if readErr != nil || response.StatusCode != http.StatusOK || string(body) != "FORWARD_OK" {
+			t.Fatalf("invalid fixture response: status %d, body %q, error %v", response.StatusCode, body, readErr)
+		}
+	}
 }
 
 // ============================================================================
