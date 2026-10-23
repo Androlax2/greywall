@@ -1205,6 +1205,17 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 
 	cwd, _ := os.Getwd()
 	features := DetectLinuxFeatures()
+	var networkTools map[string]string
+	if proxyBridge != nil {
+		networkTools = make(map[string]string)
+		for _, tool := range []string{"unshare", "setpriv", "ss"} {
+			toolPath, err := exec.LookPath(tool)
+			if err != nil {
+				return "", fmt.Errorf("network setup requires %s: %w", tool, err)
+			}
+			networkTools[tool] = resolveToolPath(toolPath)
+		}
+	}
 	if opts.UseSeccomp && !features.HasSeccomp {
 		return "", fmt.Errorf("refusing to start: requested seccomp is unavailable")
 	}
@@ -1441,6 +1452,11 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	var dnsRelayResolvConf string // temp file path for custom resolv.conf
 	var caCertPath string         // greyproxy CA cert path (if available)
 	if proxyBridge != nil {
+		// --dev can introduce a second user namespace after bwrap creates its
+		// network namespace. Create the usable network in that final userns instead.
+		bwrapArgs = append(bwrapArgs, "--cap-drop", "ALL",
+			"--cap-add", "CAP_SYS_ADMIN", "--cap-add", "CAP_SETPCAP",
+			"--cap-add", "CAP_NET_ADMIN", "--cap-add", "CAP_NET_BIND_SERVICE")
 		bwrapArgs = append(
 			bwrapArgs,
 			"--bind", proxyBridge.SocketPath, proxyBridge.SocketPath,
@@ -1458,10 +1474,6 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 			if features.HasDevNetTun {
 				bwrapArgs = append(bwrapArgs, "--dev-bind", "/dev/net/tun", "/dev/net/tun")
 			}
-			// Preserve CAP_NET_ADMIN (TUN device + network config) and
-			// CAP_NET_BIND_SERVICE (DNS relay on port 53) inside the namespace
-			bwrapArgs = append(bwrapArgs, "--cap-add", "CAP_NET_ADMIN")
-			bwrapArgs = append(bwrapArgs, "--cap-add", "CAP_NET_BIND_SERVICE")
 			// Bind the tun2socks binary into the sandbox (read-only)
 			bwrapArgs = append(bwrapArgs, "--ro-bind", tun2socksPath, "/tmp/greywall-tun2socks")
 		}
@@ -1570,12 +1582,35 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		maskArgs = append(maskArgs, greyproxyMasks...)
 	}
 
-	bwrapArgs = append(bwrapArgs, "--", shellPath, "-c")
+	bwrapArgs = append(bwrapArgs, "--")
+	if proxyBridge != nil {
+		// Drop setup-only capabilities before any shell startup code can run.
+		// NOROOT also prevents uid 0 callers regaining bounding-set caps on exec.
+		bwrapArgs = append(bwrapArgs, networkTools["unshare"], "--net", "--",
+			networkTools["setpriv"], "--no-new-privs",
+			"--securebits=+noroot,+noroot_locked",
+			"--bounding-set=-sys_admin,-setpcap",
+			"--inh-caps=-sys_admin,-setpcap", "--ambient-caps=-sys_admin,-setpcap", "--")
+	}
+	bwrapArgs = append(bwrapArgs, shellPath, "-c")
 
 	// Build the inner command that sets up tun2socks and runs the user command
 	var innerScript strings.Builder
 
 	innerScript.WriteString("export GREYWALL_SANDBOX=1\n")
+	innerScript.WriteString(`cleanup() {
+    jobs -p | xargs -r kill 2>/dev/null
+}
+trap cleanup EXIT
+`)
+	if proxyBridge != nil {
+		innerScript.WriteString(`network_failure() {
+    printf '[greywall:network] %s\n' "$1" >&2
+    exit 1
+}
+ip link set lo up || network_failure 'cannot bring up loopback'
+`)
+	}
 
 	// Set CA cert env vars so sandboxed apps trust the greyproxy MITM CA certificate.
 	// NODE_EXTRA_CA_CERTS: Node.js uses its own compiled-in CA bundle and ignores the OS keychain.
@@ -1600,22 +1635,19 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 
 		// Set up transparent proxy via TUN device + tun2socks
 		fmt.Fprintf(&innerScript, `
-# Bring up loopback interface (needed for socat to bind on 127.0.0.1)
-ip link set lo up
-
 # Set up TUN device for transparent proxying
-ip tuntap add dev tun0 mode tun
-ip addr add 198.18.0.1/15 dev tun0
-ip link set dev tun0 up
-ip route add default via 198.18.0.1 dev tun0
+ip tuntap add dev tun0 mode tun || network_failure 'cannot create TUN device'
+ip addr add 198.18.0.1/15 dev tun0 || network_failure 'cannot address TUN device'
+ip link set dev tun0 up || network_failure 'cannot bring up TUN device'
+ip route add default via 198.18.0.1 dev tun0 || network_failure 'cannot configure TUN route'
 
 # Bridge: local port -> Unix socket -> host -> external SOCKS5 proxy
 PROXY_PORT=18321
-socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null 2>&1 &
+socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
 BRIDGE_PID=$!
 
 # Start tun2socks (transparent proxy via gvisor netstack)
-/tmp/greywall-tun2socks -device tun0 -proxy %s >/dev/null 2>&1 &
+/tmp/greywall-tun2socks -device tun0 -proxy %s >/dev/null &
 TUN2SOCKS_PID=$!
 
 `, proxyBridge.SocketPath, tun2socksProxyURL)
@@ -1626,7 +1658,7 @@ TUN2SOCKS_PID=$!
 		if dnsBridge != nil {
 			// Dedicated DNS bridge: UDP :53 -> Unix socket -> host DNS server
 			fmt.Fprintf(&innerScript, `# DNS relay: UDP queries -> Unix socket -> host DNS server (%s)
-socat UDP4-RECVFROM:53,fork,reuseaddr UNIX-CONNECT:%s >/dev/null 2>&1 &
+socat UDP4-RECVFROM:53,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
 DNS_RELAY_PID=$!
 
 `, dnsBridge.DnsAddr, dnsBridge.SocketPath)
@@ -1634,12 +1666,9 @@ DNS_RELAY_PID=$!
 	} else if proxyBridge != nil {
 		// Fallback: no TUN support, use env-var-based proxying
 		fmt.Fprintf(&innerScript, `
-# Bring up loopback interface (needed for socat to bind on 127.0.0.1)
-ip link set lo up 2>/dev/null
-
 # Set up SOCKS5 bridge (no TUN available, env-var-based proxying)
 PROXY_PORT=18321
-socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null 2>&1 &
+socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
 BRIDGE_PID=$!
 
 export ALL_PROXY=socks5h://127.0.0.1:${PROXY_PORT}
@@ -1652,6 +1681,11 @@ export NO_PROXY=localhost,127.0.0.1
 export no_proxy=localhost,127.0.0.1
 
 `, proxyBridge.SocketPath)
+		if dnsBridge != nil {
+			fmt.Fprintf(&innerScript, `socat UDP4-RECVFROM:53,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
+DNS_RELAY_PID=$!
+`, dnsBridge.SocketPath)
+		}
 	}
 
 	// Set up reverse (inbound) socat listeners inside the sandbox
@@ -1686,19 +1720,48 @@ export no_proxy=localhost,127.0.0.1
 		innerScript.WriteString("\n")
 	}
 
-	// Add cleanup function
-	fmt.Fprintf(&innerScript, `
-# Cleanup function
-cleanup() {
-    jobs -p | xargs -r kill 2>/dev/null
-}
-trap cleanup EXIT
-
-# Small delay to ensure services are ready
-%s 0.3
-
-# Run the user command
+	if proxyBridge != nil {
+		fmt.Fprintf(&innerScript, `
+NETWORK_READY=0
+for attempt in {1..50}; do
+    kill -0 "$BRIDGE_PID" 2>/dev/null || network_failure 'SOCKS bridge exited before readiness'
+    HELPERS_READY=1
+    [ -n "$(%s -H -ltn 'sport = :18321')" ] || HELPERS_READY=0
+`, ShellQuoteSingle(networkTools["ss"]))
+		if tun2socksPath != "" && features.CanUseTransparentProxy() {
+			innerScript.WriteString(`    kill -0 "$TUN2SOCKS_PID" 2>/dev/null || network_failure 'tun2socks exited before readiness'
+    ip -o link show dev tun0 | grep -q LOWER_UP || HELPERS_READY=0
+`)
+		}
+		if dnsBridge != nil {
+			fmt.Fprintf(&innerScript, `    kill -0 "$DNS_RELAY_PID" 2>/dev/null || network_failure 'DNS relay exited before readiness'
+    [ -n "$(%s -H -lun 'sport = :53')" ] || HELPERS_READY=0
+`, ShellQuoteSingle(networkTools["ss"]))
+		}
+		if reverseBridge != nil {
+			for i, port := range reverseBridge.Ports {
+				fmt.Fprintf(&innerScript, `    kill -0 "$REV_%d_PID" 2>/dev/null || network_failure 'reverse bridge %d exited before readiness'
+    [ -S %s ] || HELPERS_READY=0
+`, port, port, ShellQuoteSingle(reverseBridge.SocketPaths[i]))
+			}
+		}
+		if forwardBridge != nil {
+			for _, port := range forwardBridge.Ports {
+				fmt.Fprintf(&innerScript, `    kill -0 "$FWD_%d_PID" 2>/dev/null || network_failure 'forward bridge %d exited before readiness'
+    [ -n "$(%s -H -ltn 'sport = :%d')" ] || HELPERS_READY=0
+`, port, port, ShellQuoteSingle(networkTools["ss"]), port)
+			}
+		}
+		fmt.Fprintf(&innerScript, `    if [ "$HELPERS_READY" = 1 ]; then NETWORK_READY=1; break; fi
+    %s 0.1
+done
+[ "$NETWORK_READY" = 1 ] || network_failure 'timed out waiting for network helpers'
 `, ShellQuoteSingle(sleepPath))
+		// The setup shell keeps NET_ADMIN for helpers, not for the user command.
+		command = ShellQuote([]string{networkTools["setpriv"], "--inh-caps=-all", "--ambient-caps=-all", "--", shellPath, "-c", command})
+	} else if reverseBridge != nil || forwardBridge != nil {
+		fmt.Fprintf(&innerScript, "%s 0.3\n", ShellQuoteSingle(sleepPath))
+	}
 
 	// In learning mode, wrap the command with strace to trace syscalls.
 	// Run strace in the foreground so the traced command retains terminal

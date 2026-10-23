@@ -102,6 +102,7 @@ make setup && make build   # creates ./greywall and ./greywatch symlink
 
 - `bubblewrap` - container-free sandboxing (required)
 - `socat` - network bridging (required)
+- `util-linux` (`unshare`, `setpriv`) and `iproute2` (`ip`, `ss`) - isolated network setup and helper readiness checks (required for proxying)
 - `xdg-dbus-proxy` - filtered D-Bus proxy for notify-send support (optional)
 - `libsecret-tools` - keyring credential injection for gh/glab (optional)
 
@@ -273,7 +274,7 @@ By default, traffic routes through the GreyProxy SOCKS5 proxy at `localhost:4305
 | **Environment sanitization** | ✅ | ✅ |
 | **Learning mode** | ✅ (strace) | ✅ (eslogger, requires sudo) |
 | **PTY support** | ✅ | ✅ |
-| **External deps** | bwrap, socat, xdg-dbus-proxy (optional) | none |
+| **External deps** | bwrap, socat, util-linux, iproute2, xdg-dbus-proxy (optional) | none |
 
 See [platform support](https://docs.greywall.io/greywall/platform-support) for more details.
 

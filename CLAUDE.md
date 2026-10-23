@@ -65,7 +65,7 @@ scripts/               Smoke tests, benchmarks, release
 
 4 direct deps: `doublestar` (glob matching), `cobra` (CLI), `jsonc` (config parsing), `golang.org/x/sys`.
 
-Runtime (Linux): `bubblewrap`, `socat`, embedded `tun2socks` v2.5.2.
+Runtime (Linux): `bubblewrap`, `socat`, util-linux (`unshare`, `setpriv`), iproute2 (`ip`, `ss`), embedded `tun2socks` v2.5.2.
 
 ## CI
 
