@@ -76,7 +76,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 			return err
 		}
 		if actual != filepath.Clean(path) {
-			if err := checkGitSymlinkChain(path, writable); err != nil {
+			if err := checkGitSymlinkChain(path, writable, false); err != nil {
 				return err
 			}
 			for grant := range writable {
@@ -121,7 +121,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 		anchors = append(anchors, resolved)
 		// A missing commondir is equivalent to this directory. Reserve that
 		// meaning so the sandbox cannot introduce a different common config.
-		commonPointer, err := os.OpenFile(filepath.Join(resolved, "commondir"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		commonPointer, err := os.OpenFile(filepath.Join(resolved, "commondir"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G703 -- fixed metadata name in the canonical Git directory; exclusive creation preserves existing data
 		if err == nil {
 			_, writeErr := commonPointer.WriteString(".\n")
 			closeErr := commonPointer.Close()
@@ -133,7 +133,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 		}
 		// A repository may already enable extensions.worktreeConfig while the
 		// per-worktree file is still absent. Reserve it before sandbox startup.
-		placeholder, err := os.OpenFile(filepath.Join(resolved, "config.worktree"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		placeholder, err := os.OpenFile(filepath.Join(resolved, "config.worktree"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G703 -- linked-worktree metadata may be external; exclusive creation preserves existing config
 		if err == nil {
 			if err := placeholder.Close(); err != nil {
 				return err
@@ -143,7 +143,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 		}
 		for _, name := range []string{"config", "config.worktree", "commondir", "gitdir"} {
 			path := filepath.Join(resolved, name)
-			if _, err := os.Lstat(path); err == nil {
+			if _, err := os.Lstat(path); err == nil { // #nosec G703 -- inspects fixed metadata names without following symlinks before protecting them
 				if err := protect(path); err != nil {
 					return err
 				}
@@ -152,7 +152,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 			}
 		}
 		hooks := filepath.Join(resolved, "hooks")
-		if err := os.MkdirAll(hooks, 0o700); err != nil {
+		if err := os.MkdirAll(hooks, 0o700); err != nil { // #nosec G703 -- reserves the canonical Git directory's hooks path before the sandbox can create it
 			return fmt.Errorf("prepare Git hooks directory: %w", err)
 		}
 		if err := protect(hooks); err != nil {
@@ -163,7 +163,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 				anchors = append(anchors, worktree)
 			}
 			marker := filepath.Join(worktree, ".git")
-			if info, err := os.Lstat(marker); err == nil && !info.IsDir() {
+			if info, err := os.Lstat(marker); err == nil && !info.IsDir() { // #nosec G703 -- inspects the registered worktree's .git marker without following symlinks
 				if err := protect(marker); err != nil {
 					return err
 				}
@@ -181,7 +181,10 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 				}
 				// /dev/null is Git's conventional way to disable hooks.
 				if custom != "/dev/null" {
-					if err := os.MkdirAll(custom, 0o700); err != nil {
+					if err := checkGitSymlinkChain(custom, writable, true); err != nil {
+						return fmt.Errorf("validate core.hooksPath: %w", err)
+					}
+					if err := os.MkdirAll(custom, 0o700); err != nil { // #nosec G703 -- validates existing ancestors before reserving the configured external hooks path
 						return fmt.Errorf("prepare core.hooksPath: %w", err)
 					}
 					if err := protect(custom); err != nil {
@@ -219,7 +222,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 				}
 				include = filepath.Clean(include)
 				if !fileExists(include) {
-					return fmt.Errorf("Git config include %s is missing; create it before starting the sandbox", include)
+					return fmt.Errorf("missing Git config include %s; create it before starting the sandbox", include)
 				}
 				if err := protect(include); err != nil {
 					return err
@@ -274,6 +277,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 			if !fileExists(base) {
 				continue
 			}
+			// #nosec G703 -- walks fixed Git metadata subtrees; WalkDir does not follow directory symlinks
 			if err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, err error) error {
 				if err != nil {
 					return err
@@ -311,7 +315,7 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 					return fmt.Errorf("invalid submodule path %q", relative)
 				}
 				marker := filepath.Join(sub, ".git")
-				info, err := os.Lstat(marker)
+				info, err := os.Lstat(marker) // #nosec G703 -- the submodule path was checked above to stay within its worktree
 				if errors.Is(err, os.ErrNotExist) {
 					continue // uninitialized submodule
 				}
@@ -388,12 +392,12 @@ func gitProtectionArgs(cfg *config.Config, cwd string) ([]string, []string, erro
 }
 
 func readGitDirPointer(path string) (string, error) {
-	info, err := os.Lstat(path)
+	info, err := os.Lstat(path) // #nosec G703 -- inspects a registered .git pointer without following symlinks
 	if err != nil {
 		return "", err
 	}
 	if !info.Mode().IsRegular() || info.Size() > 1024*1024 {
-		return "", fmt.Errorf("Git directory pointer must be a small regular file: %s", path)
+		return "", fmt.Errorf("invalid Git directory pointer: expected a small regular file: %s", path)
 	}
 	contents, err := os.ReadFile(path) //nolint:gosec // repository metadata
 	if err != nil {
@@ -409,16 +413,19 @@ func readGitDirPointer(path string) (string, error) {
 	return filepath.Clean(value), nil
 }
 
-// A host-managed include symlink is safe only if no link in its entire
-// resolution chain can be replaced by this sandbox.
-func checkGitSymlinkChain(path string, writable map[string]bool) error {
+// Host-managed Git paths may contain symlinks only outside writable areas.
+// New hooks paths may have missing suffixes; existing metadata must fail closed.
+func checkGitSymlinkChain(path string, writable map[string]bool, allowMissingSuffix bool) error {
 	for hops := 0; hops < 40; hops++ {
 		parts := strings.Split(strings.TrimPrefix(filepath.Clean(path), "/"), "/")
 		current := "/"
 		followed := false
 		for i, part := range parts {
 			current = filepath.Join(current, part)
-			info, err := os.Lstat(current)
+			info, err := os.Lstat(current) // #nosec G703 -- inspects each Git config path component to reject replaceable symlinks
+			if allowMissingSuffix && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}

@@ -19,10 +19,10 @@ func TestSmokeTests_DoNotPassInteractiveInputToGreywall(t *testing.T) {
 	// smoke suite. If stdin leaks, the first invocation consumes our line.
 	program := "#!/bin/bash\nif read -r line; then echo INPUT_REACHED_GREYWALL; exit 99; fi\n" +
 		"if [[ $1 == --version ]]; then exit 0; fi\necho FIXTURE_STOP; exit 99\n"
-	if err := os.WriteFile(fixture, []byte(program), 0o700); err != nil {
+	if err := os.WriteFile(fixture, []byte(program), 0o700); err != nil { // #nosec G306 -- owner-only executable fixture tests smoke-script input handling
 		t.Fatal(err)
 	}
-	command := exec.Command("bash", script, fixture)
+	command := exec.Command("bash", script, fixture) // #nosec G204 -- runs the repository's smoke script with this test's temporary executable fixture
 	command.Dir = directory
 	command.Stdin = strings.NewReader("interactive answer\n")
 	output, err := command.CombinedOutput()

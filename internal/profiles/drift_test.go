@@ -193,7 +193,7 @@ func TestDriftWithoutExplicitConsentPreservesReviewedProfile(t *testing.T) {
 			if _, err := ApplyDriftAction(action, learned, bundled, "claude"); err != nil {
 				t.Fatal(err)
 			}
-			after, err := os.ReadFile(path)
+			after, err := os.ReadFile(path) // #nosec G304 -- reads this test's profile under its temporary XDG_CONFIG_HOME
 			if err != nil {
 				t.Fatal(err)
 			}
