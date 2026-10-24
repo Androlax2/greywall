@@ -300,3 +300,33 @@ func TestNetworkHelpers_WaitForDelayedPortBridges(t *testing.T) {
 		})
 	}
 }
+
+func TestNetworkHelpers_BridgeStderrStaysOffTerminal(t *testing.T) {
+	for _, mode := range []string{"tun", "fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			proxy, dns, tunPath := networkHelperFixtures(t)
+			if mode == "fallback" {
+				tunPath = ""
+			}
+			socatPath, err := exec.LookPath("socat")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			program := "#!/bin/sh\ncase \"$1\" in UDP4-RECVFROM:53*) echo DNS_BRIDGE_NOISE >&2;; TCP-LISTEN:18321*) echo PROXY_BRIDGE_NOISE >&2;; esac\nexec " + ShellQuoteSingle(socatPath) + " \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "socat"), []byte(program), 0o700); err != nil { // #nosec G306 -- owner-only executable test fixture
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cfg := &config.Config{Filesystem: config.FilesystemConfig{AllowWrite: []string{bin}}}
+			// Bridges start in the background, so give them time to write before the command exits.
+			output, err := runNetworkHelperCommand(t, cfg, "sleep 1; echo USER_COMMAND_RAN", proxy, dns, tunPath, LinuxSandboxOptions{})
+			if err != nil || !strings.Contains(output, "USER_COMMAND_RAN") {
+				t.Fatalf("sandbox command failed: %v\n%s", err, output)
+			}
+			if strings.Contains(output, "BRIDGE_NOISE") {
+				t.Fatalf("bridge stderr reached the terminal:\n%s", output)
+			}
+		})
+	}
+}
