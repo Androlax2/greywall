@@ -1643,7 +1643,7 @@ ip route add default via 198.18.0.1 dev tun0 || network_failure 'cannot configur
 
 # Bridge: local port -> Unix socket -> host -> external SOCKS5 proxy
 PROXY_PORT=18321
-socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
+socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null 2>&1 &
 BRIDGE_PID=$!
 
 # Start tun2socks (transparent proxy via gvisor netstack)
@@ -1658,7 +1658,7 @@ TUN2SOCKS_PID=$!
 		if dnsBridge != nil {
 			// Dedicated DNS bridge: UDP :53 -> Unix socket -> host DNS server
 			fmt.Fprintf(&innerScript, `# DNS relay: UDP queries -> Unix socket -> host DNS server (%s)
-socat UDP4-RECVFROM:53,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
+socat UDP4-RECVFROM:53,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null 2>&1 &
 DNS_RELAY_PID=$!
 
 `, dnsBridge.DnsAddr, dnsBridge.SocketPath)
@@ -1668,7 +1668,7 @@ DNS_RELAY_PID=$!
 		fmt.Fprintf(&innerScript, `
 # Set up SOCKS5 bridge (no TUN available, env-var-based proxying)
 PROXY_PORT=18321
-socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
+socat TCP-LISTEN:${PROXY_PORT},fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null 2>&1 &
 BRIDGE_PID=$!
 
 export ALL_PROXY=socks5h://127.0.0.1:${PROXY_PORT}
@@ -1682,7 +1682,7 @@ export no_proxy=localhost,127.0.0.1
 
 `, proxyBridge.SocketPath)
 		if dnsBridge != nil {
-			fmt.Fprintf(&innerScript, `socat UDP4-RECVFROM:53,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null &
+			fmt.Fprintf(&innerScript, `socat UDP4-RECVFROM:53,fork,reuseaddr,bind=127.0.0.1 UNIX-CONNECT:%s >/dev/null 2>&1 &
 DNS_RELAY_PID=$!
 `, dnsBridge.SocketPath)
 		}
