@@ -86,22 +86,30 @@ func TestVerifyMasks_FailsWhenAFileInAMaskedDirIsReadable(t *testing.T) {
 	}
 }
 
-func TestMaskedPathsFromEnv(t *testing.T) {
-	t.Setenv(MaskedPathsEnvVar, `{"files":["/a"],"dirs":["/b"],"exceptions":["/b/c"]}`)
+func TestReadMaskedPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "masked-paths.json")
+	writeTestFile(t, path, `{"files":["/a"],"dirs":["/b"],"exceptions":["/b/c"]}`)
 
-	masked, err := MaskedPathsFromEnv()
+	masked, err := ReadMaskedPaths(path)
 	if err != nil {
-		t.Fatalf("MaskedPathsFromEnv: %v", err)
+		t.Fatalf("ReadMaskedPaths: %v", err)
 	}
 	if !slices.Equal(masked.Files, []string{"/a"}) || !slices.Equal(masked.Dirs, []string{"/b"}) || !slices.Equal(masked.Exceptions, []string{"/b/c"}) {
 		t.Errorf("got %+v", masked)
 	}
 }
 
-func TestMaskedPathsFromEnv_FailsOnInvalidJSON(t *testing.T) {
-	t.Setenv(MaskedPathsEnvVar, "not json")
+func TestReadMaskedPaths_FailsOnInvalidJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "masked-paths.json")
+	writeTestFile(t, path, "not json")
 
-	if _, err := MaskedPathsFromEnv(); err == nil {
+	if _, err := ReadMaskedPaths(path); err == nil {
 		t.Error("invalid JSON was accepted")
+	}
+}
+
+func TestReadMaskedPaths_FailsWhenTheFileIsMissing(t *testing.T) {
+	if _, err := ReadMaskedPaths(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Error("a missing masked-paths file was read as no masks")
 	}
 }

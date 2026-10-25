@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1174,6 +1176,27 @@ func isSystemMountPoint(path string) bool {
 
 // WrapCommandLinux wraps a command with Linux bubblewrap sandbox.
 // Requested security features must be available; failures abort startup.
+// File descriptors of the generated command: fd 3 carries the seccomp filter,
+// 4 and 5 the Landlock wrapper inputs, and the system SSH drop-ins start at 6.
+const (
+	wrapperConfigFD      = 4
+	wrapperMaskedPathsFD = 5
+	firstSSHConfigFD     = 6
+)
+
+// dataFileArgs makes bwrap write data to destination inside the sandbox. The
+// data reaches bwrap through a here-document on fd, so it is never part of an
+// argument, where Linux caps a single string at 128 KiB (MAX_ARG_STRLEN).
+func dataFileArgs(fd int, data []byte, destination string) (args []string, redirection string, err error) {
+	if bytes.ContainsRune(data, '\n') {
+		return nil, "", fmt.Errorf("data for %s spans several lines and cannot be a here-document", destination)
+	}
+	delimiter := fmt.Sprintf("GREYWALL_DATA_%d", fd)
+	redirection = fmt.Sprintf("exec %d<<'%s'\n%s\n%s\n", fd, delimiter, data, delimiter)
+	args = []string{"--perms", "0444", "--ro-bind-data", strconv.Itoa(fd), destination}
+	return args, redirection, nil
+}
+
 func WrapCommandLinux(cfg *config.Config, command string, proxyBridge *ProxyBridge, dnsBridge *DnsBridge, reverseBridge *ReverseBridge, forwardBridge *ForwardBridge, dbusBridge *DbusBridge, tun2socksPath string, debug bool) (string, error) {
 	return WrapCommandLinuxWithOptions(cfg, command, proxyBridge, dnsBridge, reverseBridge, forwardBridge, dbusBridge, tun2socksPath, LinuxSandboxOptions{
 		UseLandlock: true,
@@ -1572,15 +1595,47 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 		bwrapArgs = append(bwrapArgs, "--ro-bind", greywallExePath, greywallExePath)
 	}
 
+	var greyproxyMasks []string
+	if !opts.Learning {
+		greyproxyMasks = greyproxyDenyReadArgs()
+		maskArgs = append(maskArgs, greyproxyMasks...)
+	}
+
+	var wrapperInputFDs string
+	if useLandlockWrapper {
+		masked := maskedPathsFromArgs(maskArgs)
+		if !opts.Watch {
+			masked.Future = futureDenyReadPaths(cfg)
+		}
+		maskedJSON, err := json.Marshal(masked)
+		if err != nil {
+			return "", fmt.Errorf("encode masked paths: %w", err)
+		}
+		inputArgs, inputFDs, err := dataFileArgs(wrapperMaskedPathsFD, maskedJSON, WrapperMaskedPathsFile)
+		if err != nil {
+			return "", err
+		}
+		bwrapArgs = append(bwrapArgs, inputArgs...)
+		wrapperInputFDs += inputFDs
+		if cfg != nil {
+			configJSON, err := json.Marshal(cfg)
+			if err != nil {
+				return "", fmt.Errorf("encode config for the Landlock wrapper: %w", err)
+			}
+			inputArgs, inputFDs, err := dataFileArgs(wrapperConfigFD, configJSON, WrapperConfigFile)
+			if err != nil {
+				return "", err
+			}
+			bwrapArgs = append(bwrapArgs, inputArgs...)
+			wrapperInputFDs += inputFDs
+		}
+	}
+
 	// Mask greyproxy's private state. MUST stay the last filesystem-mount block —
 	// "last mount wins" is what stops an earlier bind (or a hostile bridge socket
 	// inside the data dir) from re-exposing the secrets, so don't append binds
 	// after this. Gated on "not learning" so it also covers --watch.
-	if !opts.Learning {
-		greyproxyMasks := greyproxyDenyReadArgs()
-		bwrapArgs = append(bwrapArgs, greyproxyMasks...)
-		maskArgs = append(maskArgs, greyproxyMasks...)
-	}
+	bwrapArgs = append(bwrapArgs, greyproxyMasks...)
 
 	bwrapArgs = append(bwrapArgs, "--")
 	if proxyBridge != nil {
@@ -1785,25 +1840,6 @@ exit $GREYWALL_STRACE_EXIT
 			ShellQuoteSingle(opts.StraceLogPath), command, ShellQuoteSingle(sleepPath),
 		)
 	case useLandlockWrapper:
-		// Use Landlock wrapper if available
-		// Pass config via environment variable (serialized as JSON)
-		// This ensures allowWrite/denyWrite rules are properly applied
-		if cfg != nil {
-			configJSON, err := json.Marshal(cfg)
-			if err == nil {
-				fmt.Fprintf(&innerScript, "export GREYWALL_CONFIG_JSON=%s\n", ShellQuoteSingle(string(configJSON)))
-			}
-		}
-		masked := maskedPathsFromArgs(maskArgs)
-		if !opts.Watch {
-			masked.Future = futureDenyReadPaths(cfg)
-		}
-		maskedJSON, err := json.Marshal(masked)
-		if err != nil {
-			return "", fmt.Errorf("encode masked paths: %w", err)
-		}
-		fmt.Fprintf(&innerScript, "export %s=%s\n", MaskedPathsEnvVar, ShellQuoteSingle(string(maskedJSON)))
-
 		// Build wrapper command with proper quoting
 		// Use bash -c to preserve shell semantics (e.g., "echo hi && ls")
 		wrapperArgs := []string{greywallExePath, "--landlock-apply"}
@@ -1854,7 +1890,9 @@ exit $GREYWALL_STRACE_EXIT
 	}
 
 	// Build the final command
-	bwrapCmd := sshConfigFDs + ShellQuote(bwrapArgs)
+	// exec keeps bwrap the process greywall signals, also when this command
+	// runs from a script file, where shells do not exec the last command.
+	bwrapCmd := wrapperInputFDs + sshConfigFDs + "exec " + ShellQuote(bwrapArgs)
 
 	// If seccomp filter is enabled, wrap with fd redirection
 	// bwrap --seccomp expects the filter on the specified fd
