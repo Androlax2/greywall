@@ -2,11 +2,82 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/GreyhavenHQ/greywall/internal/config"
 )
+
+// A config with ~320 denyWrite paths made the sandbox command 132,854 bytes,
+// over Linux's 128 KiB limit on one argument (MAX_ARG_STRLEN).
+func TestSandboxShellCommand_RunsCommandLargerThanOneArgument(t *testing.T) {
+	padding := strings.Repeat("x", 200*1024)
+	cmd, removeScript, err := sandboxShellCommand("padding='" + padding + "'\nprintf %s \"${#padding}\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(removeScript)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command failed: %v\n%.200s", err, output)
+	}
+	if string(output) != strconv.Itoa(len(padding)) {
+		t.Errorf("command saw %q bytes of padding, want %d", output, len(padding))
+	}
+}
+
+func TestSandboxShellCommand_RemoveScriptDeletesTheScript(t *testing.T) {
+	cmd, removeScript, err := sandboxShellCommand("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeScript()
+
+	for _, arg := range cmd.Args[1:] {
+		if _, err := os.Stat(arg); err == nil {
+			t.Errorf("script %s is still on disk", arg)
+		}
+	}
+}
+
+func TestReadWrapperConfig_UsesDefaultsWhenGreywallPassedNoConfig(t *testing.T) {
+	cfg, err := readWrapperConfig(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg == nil {
+		t.Fatal("no config returned")
+	}
+}
+
+func TestReadWrapperConfig_RefusesInvalidConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readWrapperConfig(path); err == nil {
+		t.Error("an unreadable config fell back to defaults")
+	}
+}
+
+func TestReadWrapperConfig_ReadsTheConfigGreywallPassed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"filesystem":{"denyWrite":["/protected"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := readWrapperConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Filesystem.DenyWrite, []string{"/protected"}) {
+		t.Errorf("denyWrite = %v, want [/protected]", cfg.Filesystem.DenyWrite)
+	}
+}
 
 // TestApplySessionAllowPaths verifies that --allow-path grants read+write while
 // --allow-read-path grants read-only, both appended to the session config.

@@ -12,9 +12,14 @@ import (
 	"syscall"
 )
 
-// MaskedPathsEnvVar carries the MaskedPaths of a sandbox, as JSON, from the
-// greywall that builds it to the wrapper that runs inside it.
-const MaskedPathsEnvVar = "GREYWALL_MASKED_PATHS"
+// The greywall that builds a sandbox passes the Landlock wrapper inside it its
+// config and MaskedPaths as JSON files at these paths. Arguments or environment
+// variables would hit Linux's 128 KiB limit on a single string once a config
+// lists a few hundred paths.
+const (
+	WrapperConfigFile      = "/tmp/.greywall-wrapper/config.json"
+	WrapperMaskedPathsFile = "/tmp/.greywall-wrapper/masked-paths.json"
+)
 
 // maxMaskedDirEntries bounds how much of a masked directory VerifyMasks reads.
 // A working mask is an empty tmpfs, so only a broken one gets anywhere near it.
@@ -36,16 +41,15 @@ type MaskedPaths struct {
 	Future []string `json:"future,omitempty"`
 }
 
-// MaskedPathsFromEnv reads the MaskedPaths greywall passed to the wrapper.
-// It returns no paths when the variable is unset.
-func MaskedPathsFromEnv() (MaskedPaths, error) {
+// ReadMaskedPaths reads the MaskedPaths greywall passed to the wrapper.
+func ReadMaskedPaths(path string) (MaskedPaths, error) {
 	var masked MaskedPaths
-	encoded := os.Getenv(MaskedPathsEnvVar)
-	if encoded == "" {
-		return masked, nil
+	encoded, err := os.ReadFile(path) //nolint:gosec // path is WrapperMaskedPathsFile or a test fixture
+	if err != nil {
+		return masked, fmt.Errorf("read masked paths: %w", err)
 	}
-	if err := json.Unmarshal([]byte(encoded), &masked); err != nil {
-		return masked, fmt.Errorf("parse %s: %w", MaskedPathsEnvVar, err)
+	if err := json.Unmarshal(encoded, &masked); err != nil {
+		return masked, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return masked, nil
 }

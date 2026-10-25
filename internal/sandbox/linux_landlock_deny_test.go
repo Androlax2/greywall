@@ -16,7 +16,10 @@ import (
 	"github.com/GreyhavenHQ/greywall/internal/config"
 )
 
-const landlockHelperEnvVar = "GREYWALL_TEST_LANDLOCK_HELPER"
+const (
+	landlockHelperEnvVar    = "GREYWALL_TEST_LANDLOCK_HELPER"
+	maskedPathsHelperEnvVar = "GREYWALL_TEST_MASKED_PATHS"
+)
 
 // TestLandlockHelperProcess is not a test: TestLandlockAloneHidesMaskedSecrets
 // runs it in a child process, which applies Landlock and reports what it can
@@ -30,7 +33,7 @@ func TestLandlockHelperProcess(t *testing.T) {
 		os.Exit(0)
 	}
 	var masked MaskedPaths
-	if err := json.Unmarshal([]byte(os.Getenv(MaskedPathsEnvVar)), &masked); err != nil {
+	if err := json.Unmarshal([]byte(os.Getenv(maskedPathsHelperEnvVar)), &masked); err != nil {
 		fmt.Println("ERROR=" + err.Error())
 		os.Exit(1)
 	}
@@ -117,7 +120,7 @@ func TestLandlockAloneHidesMaskedSecrets(t *testing.T) {
 			helper.Env = append(os.Environ(),
 				landlockHelperEnvVar+"=1",
 				"HOME="+home,
-				MaskedPathsEnvVar+"="+string(maskedJSON),
+				maskedPathsHelperEnvVar+"="+string(maskedJSON),
 				"GREYWALL_TEST_PROBE_PATHS="+strings.Join(append(append([]string{}, mustBeBlocked...), mustBeReadable...), "\n"),
 				fmt.Sprintf("GREYWALL_TEST_DEFAULT_DENY_READ=%v", map[bool]int{false: 0, true: 1}[defaultDenyRead]),
 			)
@@ -178,7 +181,7 @@ func TestLandlockAloneHidesDenyPathsCreatedLater(t *testing.T) {
 		"GREYWALL_TEST_WAIT_FOR_FILES=1",
 		"GREYWALL_TEST_DEFAULT_DENY_READ=0",
 		"HOME="+home,
-		MaskedPathsEnvVar+"="+string(maskedJSON),
+		maskedPathsHelperEnvVar+"="+string(maskedJSON),
 		"GREYWALL_TEST_PROBE_PATHS="+strings.Join(append(append([]string{}, createdLater...), mustBeReadable...), "\n"),
 	)
 	helperInput, err := helper.StdinPipe()

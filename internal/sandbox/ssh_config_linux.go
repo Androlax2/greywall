@@ -68,7 +68,7 @@ func systemSSHConfigArgs(directory string, denied []string) ([]string, string, e
 			args = append(args, "--ro-bind", "/dev/null", destination)
 			continue
 		}
-		fd := strconv.Itoa(i + 4) // fd 3 is reserved for the seccomp filter
+		fd := strconv.Itoa(i + firstSSHConfigFD)
 		fmt.Fprintf(&redirections, "exec %s<%s || exit 1; ", fd, ShellQuoteSingle(source))
 		args = append(args, "--perms", "0644", "--ro-bind-data", fd, destination)
 	}

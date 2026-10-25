@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -747,7 +748,6 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	if debug {
 		fmt.Fprintf(os.Stderr, "[greywall] Sandboxed command: %s\n", sandboxedCommand)
-		fmt.Fprintf(os.Stderr, "[greywall] Executing: sh -c %q\n", sandboxedCommand)
 	}
 
 	// Inject keyring secrets for active profiles (Linux only).
@@ -774,7 +774,11 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	execCmd := exec.Command("sh", "-c", sandboxedCommand) //nolint:gosec // sandboxedCommand is constructed from user input - intentional
+	execCmd, removeScript, err := sandboxShellCommand(sandboxedCommand)
+	if err != nil {
+		return err
+	}
+	defer removeScript()
 	execCmd.Env = hardenedEnv
 	execCmd.Stdin = os.Stdin
 	execCmd.Stdout = os.Stdout
@@ -1373,7 +1377,8 @@ profiles, first save a copy with --learning or copy the output of "profiles show
 // runLandlockWrapper runs in "wrapper mode" inside the sandbox.
 // It applies Landlock restrictions and then execs the user command.
 // Usage: greywall --landlock-apply [--debug] -- <command...>
-// Config is passed via GREYWALL_CONFIG_JSON environment variable.
+// Config and masked paths are read from sandbox.WrapperConfigFile and
+// sandbox.WrapperMaskedPathsFile.
 func runLandlockWrapper() {
 	// Parse arguments: --landlock-apply [--debug] -- <command...>
 	args := os.Args[2:] // Skip "greywall" and "--landlock-apply"
@@ -1409,26 +1414,17 @@ parseCommand:
 
 	// Only apply Landlock on Linux
 	if platform.Detect() == platform.Linux {
-		// Load config from environment variable (passed by parent greywall process)
-		var cfg *config.Config
-		if configJSON := os.Getenv("GREYWALL_CONFIG_JSON"); configJSON != "" {
-			cfg = &config.Config{}
-			if err := json.Unmarshal([]byte(configJSON), cfg); err != nil {
-				if debugMode {
-					fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] Warning: failed to parse config: %v\n", err)
-				}
-				cfg = nil
-			}
-		}
-		if cfg == nil {
-			cfg = config.Default()
+		cfg, err := readWrapperConfig(sandbox.WrapperConfigFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[greywall] refusing to start: %v\n", err)
+			os.Exit(1)
 		}
 
 		// Get current working directory for relative path resolution
 		cwd, _ := os.Getwd()
 
 		// Check the masks before Landlock, which could hide a broken mask.
-		masked, err := sandbox.MaskedPathsFromEnv()
+		masked, err := sandbox.ReadMaskedPaths(sandbox.WrapperMaskedPathsFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[greywall] refusing to start: %v\n", err)
 			os.Exit(1)
@@ -1468,6 +1464,44 @@ parseCommand:
 		fmt.Fprintf(os.Stderr, "[greywall:landlock-wrapper] Exec failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// sandboxShellCommand runs the wrapped sandbox command with sh. On Linux the
+// script goes through a private file: as a `sh -c` argument, a config with a
+// few hundred paths exceeds the kernel's 128 KiB limit on a single argument
+// (MAX_ARG_STRLEN). The caller runs removeScript once the command has exited.
+func sandboxShellCommand(script string) (cmd *exec.Cmd, removeScript func(), err error) {
+	if platform.Detect() != platform.Linux {
+		return exec.Command("sh", "-c", script), func() {}, nil //nolint:gosec // script is the sandbox command built from user input - intentional
+	}
+	scriptDir, err := os.MkdirTemp("", "greywall-command-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create sandbox command directory: %w", err)
+	}
+	removeScript = func() { _ = os.RemoveAll(scriptDir) }
+	scriptPath := filepath.Join(scriptDir, "command.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		removeScript()
+		return nil, nil, fmt.Errorf("write sandbox command: %w", err)
+	}
+	return exec.Command("sh", scriptPath), removeScript, nil //nolint:gosec // scriptPath is the private file written above
+}
+
+// readWrapperConfig reads the config greywall passed to the Landlock wrapper.
+// greywall writes no file when it runs without a config, which means defaults.
+func readWrapperConfig(path string) (*config.Config, error) {
+	configJSON, err := os.ReadFile(path) //nolint:gosec // path is sandbox.WrapperConfigFile or a test fixture
+	if errors.Is(err, os.ErrNotExist) {
+		return config.Default(), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read wrapper config: %w", err)
+	}
+	cfg := &config.Config{}
+	if err := json.Unmarshal(configJSON, cfg); err != nil {
+		return nil, fmt.Errorf("parse wrapper config %s: %w", path, err)
+	}
+	return cfg, nil
 }
 
 // applySessionAllowPaths grants session-scoped filesystem access from the
