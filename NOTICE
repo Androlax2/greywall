@@ -1,0 +1,19 @@
+Greywall
+Copyright 2025 Tusk AI, Inc
+Copyright 2026 The Greywall Authors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This build is published by the Androlax2/greywall fork of
+https://github.com/GreyhavenHQ/greywall.
+
+Third-party software
+--------------------
+
+Linux builds of greywall embed an unmodified tun2socks binary:
+
+  tun2socks v2.5.2, by the tun2socks authors
+  https://github.com/xjasonlyu/tun2socks
+  Licensed under the GNU General Public License, version 3
+  (see LICENSES/tun2socks-GPL-3.0.txt).
+  Corresponding source: https://github.com/xjasonlyu/tun2socks/tree/v2.5.2
