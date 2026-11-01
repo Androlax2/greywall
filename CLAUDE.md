@@ -77,3 +77,10 @@ GitHub Actions workflows: `main.yml` (build/lint/test on Linux+macOS), `release.
 make release          # patch (v0.0.X)
 make release-minor    # minor (v0.X.0)
 ```
+
+## Git authorization
+
+Claude may create feature branches, stage, commit, push feature branches and open pull
+requests in this repository (Androlax2/greywall), within the limits of Theo's global rules:
+never commit or push to the default branch or `dotfiles` directly, no force-push, no tags,
+no merges.
