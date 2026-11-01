@@ -81,6 +81,15 @@ type FilesystemConfig struct {
 	AllowWrite      []string `json:"allowWrite"`
 	DenyWrite       []string `json:"denyWrite"`
 	AllowGitConfig  bool     `json:"allowGitConfig,omitempty"`
+	Mounts          []Mount  `json:"mounts,omitempty"`
+}
+
+// Mount bind-mounts a host directory read-write at Target inside the sandbox.
+// Target must lie below /tmp (see ValidateMounts): the sandbox gets a fresh
+// tmpfs there, so a mount cannot shadow host paths the policy protects.
+type Mount struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
 }
 
 // IsDefaultDenyRead returns whether deny-by-default read mode is enabled.
@@ -266,6 +275,10 @@ func (c *Config) Validate() error {
 		return errors.New("filesystem.denyWrite contains empty path")
 	}
 
+	if err := ValidateMounts(c.Filesystem.Mounts); err != nil {
+		return err
+	}
+
 	if slices.Contains(c.Command.Deny, "") {
 		return errors.New("command.deny contains empty command")
 	}
@@ -291,6 +304,61 @@ func (c *Config) Validate() error {
 		return errors.New("ssh.deniedCommands contains empty command")
 	}
 
+	return nil
+}
+
+// ValidateMounts checks the path syntax of filesystem.mounts. Host-side checks
+// (the source exists, is a directory the caller owns, has no symlinks) happen
+// when the sandbox is built, since they depend on the machine.
+func ValidateMounts(mounts []Mount) error {
+	targets := make(map[string]bool, len(mounts))
+	for _, mount := range mounts {
+		if err := validateMountPath("source", mount.Source); err != nil {
+			return err
+		}
+		if err := validateMountPath("target", mount.Target); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(mount.Target, "/tmp/") {
+			return fmt.Errorf("filesystem.mounts target %q must be below /tmp", mount.Target)
+		}
+		if isReservedMountTarget(mount.Target) {
+			return fmt.Errorf("filesystem.mounts target %q is reserved for greywall's own files", mount.Target)
+		}
+		for other := range targets {
+			if isSameOrBelow(mount.Target, other) || isSameOrBelow(other, mount.Target) {
+				return fmt.Errorf("filesystem.mounts targets %q and %q overlap", other, mount.Target)
+			}
+		}
+		targets[mount.Target] = true
+	}
+	return nil
+}
+
+// isReservedMountTarget reports whether target sits on a /tmp name greywall
+// itself uses inside the sandbox (/tmp/.greywall-wrapper, /tmp/greywall-*).
+func isReservedMountTarget(target string) bool {
+	topLevelName, _, _ := strings.Cut(strings.TrimPrefix(target, "/tmp/"), "/")
+	return strings.HasPrefix(topLevelName, "greywall") || strings.HasPrefix(topLevelName, ".greywall")
+}
+
+func isSameOrBelow(path, ancestor string) bool {
+	return path == ancestor || strings.HasPrefix(path, ancestor+"/")
+}
+
+func validateMountPath(role, path string) error {
+	if path == "" {
+		return fmt.Errorf("filesystem.mounts %s is empty", role)
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("filesystem.mounts %s %q must be an absolute path", role, path)
+	}
+	if slices.Contains(strings.Split(path, "/"), "..") {
+		return fmt.Errorf("filesystem.mounts %s %q must not contain a .. component", role, path)
+	}
+	if filepath.Clean(path) != path {
+		return fmt.Errorf("filesystem.mounts %s %q must be a clean path (no //, . or trailing /)", role, path)
+	}
 	return nil
 }
 
@@ -505,6 +573,8 @@ func Merge(base, override *Config) *Config {
 
 			// Boolean fields: override wins if set
 			AllowGitConfig: base.Filesystem.AllowGitConfig || override.Filesystem.AllowGitConfig,
+
+			Mounts: mergeMounts(base.Filesystem.Mounts, override.Filesystem.Mounts),
 		},
 
 		Command: CommandConfig{
@@ -560,6 +630,17 @@ func mergeStrings(base, override []string) []string {
 		if !seen[s] {
 			seen[s] = true
 			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// mergeMounts appends two mount lists, removing exact duplicates.
+func mergeMounts(base, override []Mount) []Mount {
+	result := slices.Clone(base)
+	for _, mount := range override {
+		if !slices.Contains(result, mount) {
+			result = append(result, mount)
 		}
 	}
 	return result

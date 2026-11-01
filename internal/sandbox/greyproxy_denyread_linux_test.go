@@ -203,6 +203,7 @@ func TestGetMandatoryDenyPathsExcludesGreyproxySecrets(t *testing.T) {
 // "--bind <data-dir> <data-dir>" in the post-mask region — which fails unless the
 // mask is emitted genuinely last.
 func TestWrapCommandLinux_GreyproxySecretsMaskedIncludingWatch(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	cases := []struct {
 		name    string
 		opts    LinuxSandboxOptions
@@ -318,6 +319,7 @@ func TestWrapCommandLinux_GreyproxySecretsUnreadableAtRuntime(t *testing.T) {
 // greyproxy reads GREYPROXY_DATA_HOME before XDG_DATA_HOME and the default, so
 // a data dir moved there must be masked too, with ca-cert.pem still readable.
 func TestWrapCommandLinux_GreyproxySecretsMaskedWithGreyproxyDataHome(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", "")
 	dataDir := seedGreyproxyDirIn(t, t.TempDir())

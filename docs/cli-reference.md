@@ -31,6 +31,7 @@ greywall <subcommand> [args...]
 | `--learning` | | Trace filesystem access with strace/eslogger and auto-generate a profile |
 | `--allow-path <path>` | | Grant read+write access to a directory **or** file for this session only (repeatable). Nothing is persisted. See [below](#--allow-path-and---allow-read-path). |
 | `--allow-read-path <path>` | | Grant read-only access to a directory **or** file for this session only (repeatable). Nothing is persisted. |
+| `--mount <host-dir>:<sandbox-path>` | | Bind-mount a host directory you own read-write at a path below `/tmp` inside the sandbox (repeatable, Linux only). Same rules as [`filesystem.mounts`](./configuration#filesystem-configuration). |
 | `--secret <VAR>` | | Treat an environment variable as a credential even if it doesn't match the auto-detection rules (repeatable). See [Credential Protection](./credential-protection). |
 | `--inject <LABEL>` | | Inject a credential stored in the greyproxy dashboard into the sandbox by label (repeatable) |
 | `--ignore-secret <VAR>` | | Exclude a variable from credential detection even if it matches the heuristics (repeatable) |

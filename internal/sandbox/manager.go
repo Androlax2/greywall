@@ -270,6 +270,9 @@ func (m *Manager) WrapCommand(command string) (string, error) {
 	plat := platform.Detect()
 	switch plat {
 	case platform.MacOS:
+		if len(m.config.Filesystem.Mounts) > 0 {
+			return "", fmt.Errorf("filesystem.mounts (--mount) is not supported on macOS: sandbox-exec cannot bind-mount directories")
+		}
 		if m.learning {
 			// In learning mode, run command directly (no sandbox-exec wrapping)
 			return command, nil

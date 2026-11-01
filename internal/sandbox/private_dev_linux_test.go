@@ -30,6 +30,7 @@ func TestWrapCommandLinux_PrivateDevicesWorkAtRuntime(t *testing.T) {
 }
 
 func TestWrapCommandLinux_DoesNotExposeHostDevices(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	for _, mode := range []struct {
 		name string
 		opts LinuxSandboxOptions

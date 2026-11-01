@@ -22,6 +22,7 @@ func overrideLinuxFeatures(t *testing.T) *LinuxFeatures {
 }
 
 func TestWrapCommandLinux_RequiresNetworkNamespaceDespiteFailedProbe(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	overrideLinuxFeatures(t).CanUnshareNet = false
 	for _, mode := range []LinuxSandboxOptions{{}, {Watch: true}, {Learning: true}} {
 		command, err := WrapCommandLinuxWithOptions(&config.Config{}, "true", nil, nil, nil, nil, nil, "", mode)
@@ -36,6 +37,7 @@ func TestWrapCommandLinux_RequiresNetworkNamespaceDespiteFailedProbe(t *testing.
 }
 
 func TestWrapCommandLinux_FailedNamespaceNeverRunsCommand(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	overrideLinuxFeatures(t).CanUnshareNet = false
 	bin := t.TempDir()
 	// Simulate bubblewrap failing namespace setup. Without --unshare-net,

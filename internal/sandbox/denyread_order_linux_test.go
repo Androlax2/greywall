@@ -13,6 +13,7 @@ import (
 // A denyWrite of a directory binds the real directory read-only. When that bind
 // came after the denyRead masks, it re-exposed every masked file inside it.
 func TestWrapCommandLinux_DenyWriteDirectoryDoesNotUnmaskDenyReadFile(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	cases := []struct {
 		name     string
 		denyRead []string
@@ -57,6 +58,7 @@ func TestWrapCommandLinux_DenyWriteDirectoryDoesNotUnmaskDenyReadFile(t *testing
 // A denyRead directory that is also a denyWrite directory must end up hidden,
 // not bound read-only.
 func TestWrapCommandLinux_DenyReadDirectoryWinsOverDenyWrite(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	privateDir := filepath.Join(home, ".config", "private")

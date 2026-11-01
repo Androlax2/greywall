@@ -1227,6 +1227,13 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 	}
 
 	cwd, _ := os.Getwd()
+	var sessionMounts []string
+	if cfg != nil {
+		sessionMounts, err = sessionMountArgs(cfg.Filesystem, cwd)
+		if err != nil {
+			return "", err
+		}
+	}
 	features := DetectLinuxFeatures()
 	var networkTools map[string]string
 	if proxyBridge != nil {
@@ -1390,6 +1397,10 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 			append(gitParents, startupParents...), append(gitReadOnly, startupReadOnly...),
 		)...)
 
+		// After the allowWrite binds, which may bind the host's /tmp or a path
+		// matching a target and would otherwise hide the session mounts.
+		bwrapArgs = append(bwrapArgs, sessionMounts...)
+
 		// Apply mandatory deny patterns (make dangerous files/dirs read-only)
 		// This overrides any writable mounts for these paths
 		//
@@ -1468,6 +1479,7 @@ func WrapCommandLinuxWithOptions(cfg *config.Config, command string, proxyBridge
 
 	} // end if !opts.Learning && !opts.Watch
 	if opts.Learning || opts.Watch {
+		bwrapArgs = append(bwrapArgs, sessionMounts...)
 		bwrapArgs = append(bwrapArgs, sshConfigArgs...)
 	}
 

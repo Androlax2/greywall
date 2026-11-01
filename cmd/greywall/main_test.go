@@ -201,3 +201,24 @@ func TestProxyURLWithCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestParseMountFlag_SplitsHostDirAndSandboxPath(t *testing.T) {
+	mount, err := parseMountFlag("/home/user/session/codex-daemon:/tmp/codex-daemon-1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.Mount{Source: "/home/user/session/codex-daemon", Target: "/tmp/codex-daemon-1000"}
+	if mount != want {
+		t.Errorf("parseMountFlag() = %+v, want %+v", mount, want)
+	}
+}
+
+func TestParseMountFlag_RejectsMalformedValues(t *testing.T) {
+	for _, value := range []string{"", "/home/user/dir", "/home/user/dir:", ":/tmp/x", "/a:/tmp/x:/tmp/y"} {
+		t.Run(value, func(t *testing.T) {
+			if mount, err := parseMountFlag(value); err == nil {
+				t.Errorf("parseMountFlag(%q) = %+v, want error", value, mount)
+			}
+		})
+	}
+}
