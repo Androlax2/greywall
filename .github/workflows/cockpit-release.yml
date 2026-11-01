@@ -1,0 +1,177 @@
+# Builds the archives Cockpit installs, and publishes them on a cockpit tag.
+# Pull requests run the same build and smoke test without publishing.
+# How to cut a release: docs/releasing.md.
+name: Cockpit release
+
+on:
+  push:
+    tags:
+      - "v*-cockpit.*"
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned exactly (go.mod only says "go 1.25"); GOTOOLCHAIN=local stops go.mod
+  # from switching to another toolchain behind our back.
+  GO_VERSION: "1.25.14"
+  GOTOOLCHAIN: local
+
+jobs:
+  build:
+    name: Build archives
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-cockpit\.[0-9]+$ ]]; then
+            echo "::error::Tag $TAG is not v<upstream version>-cockpit.<n>"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/dotfiles; then
+            echo "::error::Tag $TAG points at $GITHUB_SHA, which is not on the dotfiles branch"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # No cache: a release build must not depend on a cache a pull request wrote.
+          cache: false
+
+      - name: Check the Go version
+        run: |
+          actual="$(go env GOVERSION)"
+          if [ "$actual" != "go$GO_VERSION" ]; then
+            echo "::error::Expected go$GO_VERSION, got $actual"
+            exit 1
+          fi
+
+      - name: Choose the version string
+        env:
+          TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            echo "VERSION=${TAG#v}" >>"$GITHUB_ENV"
+          else
+            echo "VERSION=0.0.0-ci.$(git rev-parse --short=12 HEAD)" >>"$GITHUB_ENV"
+          fi
+
+      - name: Build linux x86_64
+        run: scripts/cockpit-release-build.sh linux amd64 "$VERSION" dist
+
+      - name: Build linux arm64
+        run: scripts/cockpit-release-build.sh linux arm64 "$VERSION" dist
+
+      - name: Build macOS arm64
+        run: scripts/cockpit-release-build.sh darwin arm64 "$VERSION" dist
+
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz >SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke test ${{ matrix.target }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux_x86_64
+            runner: ubuntu-24.04
+          - target: linux_arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin_arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Verify checksum and run the binary
+        working-directory: dist
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive="$(ls -- *_"$TARGET".tar.gz)"
+          grep -F "  $archive" SHA256SUMS | shasum -a 256 -c -
+          tar -xzf "$archive"
+          dir="${archive%.tar.gz}"
+          test -f "$dir/LICENSE" && test -f "$dir/NOTICE" && test -f "$dir/LICENSES/tun2socks-GPL-3.0.txt"
+          "$dir/greywall" --version | tee version.txt
+          grep -F "$GITHUB_SHA" version.txt
+
+  publish:
+    name: Publish release
+    if: github.ref_type == 'tag'
+    needs: [build, smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Write release notes
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Cockpit build of greywall, tag \`$TAG\`."
+            echo
+            echo "- Commit: [\`$GITHUB_SHA\`](https://github.com/$REPO/commit/$GITHUB_SHA) (dotfiles branch)"
+            echo "- Go: \`go$GO_VERSION\`, \`CGO_ENABLED=0\`, \`-trimpath\`"
+            echo "- Embedded tun2socks (Linux): \`v2.5.2\`, SHA-256 checked before the build"
+            echo
+            echo "SHA256SUMS:"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "Verify an archive: \`gh attestation verify <archive> -R $REPO\`"
+          } >notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md \
+            dist/*.tar.gz dist/SHA256SUMS

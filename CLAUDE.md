@@ -69,7 +69,7 @@ Runtime (Linux): `bubblewrap`, `socat`, util-linux (`unshare`, `setpriv`), iprou
 
 ## CI
 
-GitHub Actions workflows: `main.yml` (build/lint/test on Linux+macOS), `release.yml` (GoReleaser + SLSA provenance), `benchmark.yml`.
+GitHub Actions workflows: `main.yml` (build/lint/test on Linux+macOS), `release.yml` (GoReleaser + SLSA provenance), `cockpit-release.yml` (Cockpit builds, see `docs/releasing.md`), `benchmark.yml`.
 
 ## Release
 
@@ -77,6 +77,8 @@ GitHub Actions workflows: `main.yml` (build/lint/test on Linux+macOS), `release.
 make release          # patch (v0.0.X)
 make release-minor    # minor (v0.X.0)
 ```
+
+Cockpit builds: push a `v<upstream version>-cockpit.<n>` tag on `dotfiles` (see `docs/releasing.md`).
 
 ## Git authorization
 
