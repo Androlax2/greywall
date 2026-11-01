@@ -58,6 +58,7 @@ var (
 	allowDests             []string
 	allowPaths             []string
 	allowReadPaths         []string
+	mountFlags             []string
 	blankProfile           bool
 	watch                  bool
 )
@@ -153,6 +154,7 @@ Configuration file format:
 	rootCmd.Flags().StringArrayVar(&allowDests, "allow", nil, "Allow a network destination for this session (e.g. --allow api.example.com:443)")
 	rootCmd.Flags().StringArrayVar(&allowPaths, "allow-path", nil, "Allow read+write access to a directory or file for this session (repeatable, e.g. --allow-path /tmp/work)")
 	rootCmd.Flags().StringArrayVar(&allowReadPaths, "allow-read-path", nil, "Allow read-only access to a directory or file for this session (repeatable, e.g. --allow-read-path /data/refs)")
+	rootCmd.Flags().StringArrayVar(&mountFlags, "mount", nil, "Bind-mount a host directory you own read-write at a path below /tmp in the sandbox (repeatable, e.g. --mount /home/me/session/codex-daemon:/tmp/codex-daemon-1000; Linux only)")
 	rootCmd.Flags().BoolVar(&blankProfile, "blank", false, "With --learning, skip default profile network rules (start from scratch)")
 	rootCmd.Flags().BoolVar(&watch, "watch", false, "Watch mode: skip profile loading, allow all network (logged on dashboard), permissive filesystem — observability only, no deny-by-default")
 
@@ -217,6 +219,15 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	if debug && len(ports) > 0 {
 		fmt.Fprintf(os.Stderr, "[greywall] Exposing ports: %v\n", ports)
+	}
+
+	var sessionMounts []config.Mount
+	for _, value := range mountFlags {
+		mount, err := parseMountFlag(value)
+		if err != nil {
+			return err
+		}
+		sessionMounts = append(sessionMounts, mount)
 	}
 
 	var fwdPorts []int
@@ -426,6 +437,11 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	applySessionAllowPaths(cfg, allowPaths, allowReadPaths)
 	if debug && (len(allowPaths) > 0 || len(allowReadPaths) > 0) {
 		fmt.Fprintf(os.Stderr, "[greywall] Session allow: %d rw, %d read-only path(s)\n", len(allowPaths), len(allowReadPaths))
+	}
+
+	cfg.Filesystem.Mounts = append(cfg.Filesystem.Mounts, sessionMounts...)
+	if err := config.ValidateMounts(cfg.Filesystem.Mounts); err != nil {
+		return err
 	}
 
 	// Learning mode setup
@@ -1517,6 +1533,17 @@ func applySessionAllowPaths(cfg *config.Config, rwPaths, roPaths []string) {
 		cfg.Filesystem.AllowRead = append(cfg.Filesystem.AllowRead, rwPaths...)
 		cfg.Filesystem.AllowWrite = append(cfg.Filesystem.AllowWrite, rwPaths...)
 	}
+}
+
+// parseMountFlag parses a --mount value of the form <host-dir>:<sandbox-path>.
+// Neither path may contain ':'; the paths themselves are checked by
+// config.ValidateMounts and the sandbox.
+func parseMountFlag(value string) (config.Mount, error) {
+	source, target, found := strings.Cut(value, ":")
+	if !found || source == "" || target == "" || strings.Contains(target, ":") {
+		return config.Mount{}, fmt.Errorf("invalid --mount %q: want <host-dir>:<sandbox-path>", value)
+	}
+	return config.Mount{Source: source, Target: target}, nil
 }
 
 // mergeUnique combines two string slices, removing duplicates while preserving order.

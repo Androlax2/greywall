@@ -141,6 +141,16 @@ Greywall routes all network traffic through an external SOCKS5 proxy. Domain fil
 | `allowWrite` | Paths to allow writing |
 | `denyWrite` | Paths to deny writing (takes precedence over `allowWrite`) |
 | `allowGitConfig` | Allow writes to `.git/config` files |
+| `mounts` | Host directories bind-mounted read-write inside the sandbox: `[{"source": "/abs/host/dir", "target": "/tmp/name"}]`. Linux only. |
+
+`mounts` gives the sandbox its own copy of a fixed `/tmp` path, backed by a host directory, without exposing the host's real `/tmp`. Because the sandbox gets a fresh tmpfs on `/tmp`, the target cannot cover a path the policy protects. The source is exposed read-write as it is, without greywall's usual protections, so point it at a dedicated directory. Greywall refuses:
+
+- a `target` that is not below `/tmp` (`/tmp` itself included), overlaps another target or a project folder below `/tmp`, or uses a name greywall reserves (`/tmp/greywall*`, `/tmp/.greywall*`)
+- a `source` or `target` that is relative, contains `..`, or is not a clean path
+- a `source` that is missing, not a directory, reached through a symlink, or owned by another user
+- a `source` that is or contains the home folder, or that is, contains or sits inside the project folder, greyproxy's data folder, greywall's config folder, or a `denyRead`/`denyWrite` entry
+
+On macOS, a config with `mounts` fails to start: `sandbox-exec` cannot bind-mount directories.
 
 To opt out of deny-by-default reads, set `"defaultDenyRead": false`. Use `--learning` mode to automatically discover which paths a command needs. See [Learning Mode](./learning-mode).
 

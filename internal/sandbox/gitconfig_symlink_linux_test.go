@@ -13,6 +13,7 @@ import (
 )
 
 func TestWrapCommandLinux_ProtectsSymlinkedGitconfig(t *testing.T) {
+	t.Chdir(t.TempDir()) // wrapping creates protection placeholders in the working directory
 	for _, defaultDenyRead := range []bool{false, true} {
 		name := "legacy"
 		if defaultDenyRead {
