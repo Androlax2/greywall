@@ -10,7 +10,7 @@ permissions:
 jobs:
   public-ca:
     name: Isolated macOS CA and Seatbelt tests
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 5
     steps:
       - name: Checkout
