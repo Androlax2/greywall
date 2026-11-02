@@ -1,9 +1,14 @@
 package sandbox
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -11,8 +16,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/GreyhavenHQ/greywall/internal/config"
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // sessionSuffix is a unique identifier for this process session.
@@ -52,6 +59,8 @@ type MacOSSandboxParams struct {
 	AllowGitConfig          bool
 	Shell                   string
 	RewrittenEnvFiles       map[string]string // original path -> rewritten temp path
+	CACertPath              string
+	CASnapshotRoot          string
 }
 
 // GlobToRegex converts a glob pattern to a regex for macOS sandbox profiles.
@@ -676,15 +685,28 @@ func GenerateSandboxProfile(params MacOSSandboxParams) string {
 
 	// Read rules
 	profile.WriteString("; File read\n")
-	for _, rule := range generateReadRules(params.DefaultDenyRead, params.Cwd, params.ReadAllowPaths, params.ReadDenyPaths, params.RewrittenEnvFiles, logTag) {
+	readDenyPaths := append(append([]string(nil), params.ReadDenyPaths...), SensitiveGreyproxyDirs()...)
+	for _, rule := range generateReadRules(params.DefaultDenyRead, params.Cwd, params.ReadAllowPaths, readDenyPaths, params.RewrittenEnvFiles, logTag) {
 		profile.WriteString(rule + "\n")
+	}
+	if params.CACertPath != "" {
+		fmt.Fprintf(&profile, "(allow file-read-data (literal %s))\n", escapePath(NormalizePath(params.CACertPath)))
 	}
 	profile.WriteString("\n")
 
 	// Write rules
 	profile.WriteString("; File write\n")
-	for _, rule := range generateWriteRules(params.Cwd, params.WriteAllowPaths, params.WriteDenyPaths, params.AllowGitConfig, logTag) {
+	writeDenyPaths := append(append([]string(nil), params.WriteDenyPaths...), SensitiveGreyproxyDirs()...)
+	for _, rule := range generateWriteRules(params.Cwd, params.WriteAllowPaths, writeDenyPaths, params.AllowGitConfig, logTag) {
 		profile.WriteString(rule + "\n")
+	}
+	root := params.CASnapshotRoot
+	if root == "" {
+		root = macOSCASnapshotRoot()
+	}
+	for _, path := range expandMacOSTmpPaths([]string{root}) {
+		fmt.Fprintf(&profile, "(deny file-write* (subpath %s))\n", escapePath(path))
+		fmt.Fprintf(&profile, "(deny file-write-unlink (subpath %s))\n", escapePath(path))
 	}
 
 	// PTY support
@@ -703,6 +725,189 @@ func GenerateSandboxProfile(params MacOSSandboxParams) string {
 // WrapCommandMacOS wraps a command with macOS sandbox restrictions.
 // tmpDir is the per-session temp directory to set as TMPDIR; if empty, TMPDIR is not overridden.
 func WrapCommandMacOS(cfg *config.Config, command string, exposedPorts []int, rewrittenEnvFiles map[string]string, tmpDir string, debug bool) (string, error) {
+	if err := validateMacOSGreyproxyDataHome(); err != nil {
+		return "", err
+	}
+	if cfg.Network.ProxyURL != "" || cfg.Network.HTTPProxyURL != "" {
+		_, err := os.Lstat(filepath.Join(greyproxyDataDir(), "ca-cert.pem"))
+		if err == nil {
+			return "", fmt.Errorf("greyproxy CA requires a manager-owned snapshot")
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect greyproxy CA: %w", err)
+		}
+	}
+	return wrapCommandMacOS(cfg, command, exposedPorts, rewrittenEnvFiles, tmpDir, "", debug)
+}
+
+func (m *Manager) wrapMacOSCommand(command string) (string, error) {
+	if err := validateMacOSGreyproxyDataHome(); err != nil {
+		return "", err
+	}
+	var certPath string
+	if m.config.Network.ProxyURL != "" || m.config.Network.HTTPProxyURL != "" {
+		var err error
+		certPath, err = m.snapshotMacOSCA()
+		if err != nil {
+			return "", err
+		}
+	}
+	return wrapCommandMacOSWithRoot(m.config, command, m.exposedPorts, m.rewrittenEnvFiles, m.macOSTmpDir, certPath, m.macOSCARoot, m.debug)
+}
+
+func validateMacOSGreyproxyDataHome() error {
+	if dataHome := os.Getenv("GREYPROXY_DATA_HOME"); dataHome != "" && !filepath.IsAbs(dataHome) {
+		return fmt.Errorf("invalid GREYPROXY_DATA_HOME: absolute path required on macOS")
+	}
+	return nil
+}
+
+func macOSCASnapshotRoot() string {
+	return filepath.Join("/private/tmp", fmt.Sprintf("greywall-ca-%d", os.Getuid()))
+}
+
+func (m *Manager) snapshotMacOSCA() (string, error) {
+	if m.macOSCADir != "" {
+		return filepath.Join(m.macOSCADir, "ca-cert.pem"), nil
+	}
+	source := filepath.Join(greyproxyDataDir(), "ca-cert.pem")
+	info, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect Greyproxy CA: %w", err)
+	}
+	for _, pattern := range m.config.Filesystem.DenyRead {
+		normalized := NormalizePath(pattern)
+		if ContainsGlobChars(normalized) {
+			prefix := filepath.Dir(normalized[:strings.IndexAny(normalized, "*?[")])
+			if resolved, err := filepath.EvalSymlinks(prefix); err == nil {
+				normalized = resolved + strings.TrimPrefix(normalized, prefix)
+			}
+			for path := NormalizePath(source); ; path = filepath.Dir(path) {
+				matched, err := doublestar.Match(normalized, path)
+				if err != nil {
+					return "", fmt.Errorf("invalid denyRead pattern %q: %w", pattern, err)
+				}
+				if matched {
+					return "", fmt.Errorf("greyproxy CA explicitly denied: %s", source)
+				}
+				if filepath.Dir(path) == path {
+					break
+				}
+			}
+			continue
+		}
+		if normalized == NormalizePath(filepath.Dir(source)) {
+			continue
+		}
+		relative, err := filepath.Rel(normalized, NormalizePath(source))
+		if err != nil {
+			return "", fmt.Errorf("check denyRead path %q: %w", pattern, err)
+		}
+		if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+			return "", fmt.Errorf("greyproxy CA explicitly denied: %s", source)
+		}
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("greyproxy CA is not a regular file: %s", source)
+	}
+	file, err := os.Open(source) //nolint:gosec // source is the configured Greyproxy CA
+	if err != nil {
+		return "", fmt.Errorf("open Greyproxy CA: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return "", fmt.Errorf("greyproxy CA changed while opening: %s", source)
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, 1024*1024+1))
+	if err != nil {
+		return "", fmt.Errorf("read Greyproxy CA: %w", err)
+	}
+	if len(contents) > 1024*1024 {
+		return "", fmt.Errorf("greyproxy CA exceeds 1 MiB")
+	}
+	var certificates []byte
+	for len(contents) > 0 {
+		contents = []byte(strings.TrimSpace(string(contents)))
+		if len(contents) == 0 {
+			break
+		}
+		if !strings.HasPrefix(string(contents), "-----BEGIN CERTIFICATE-----") {
+			return "", fmt.Errorf("greyproxy CA contains non-certificate data")
+		}
+		endMarker := []byte("-----END CERTIFICATE-----")
+		end := bytes.Index(contents, endMarker)
+		if end < 0 {
+			return "", fmt.Errorf("greyproxy CA contains non-certificate data")
+		}
+		end += len(endMarker)
+		block, remaining := pem.Decode(contents[:end])
+		if block == nil || len(remaining) != 0 || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return "", fmt.Errorf("greyproxy CA contains non-certificate data")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || !cert.IsCA {
+			return "", fmt.Errorf("greyproxy CA contains an invalid CA certificate")
+		}
+		certificates = append(certificates, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+		contents = contents[end:]
+	}
+	if len(certificates) == 0 {
+		return "", fmt.Errorf("greyproxy CA contains no certificates")
+	}
+	root := m.macOSCARoot
+	if root == "" {
+		root = macOSCASnapshotRoot()
+	}
+	tempDir := NormalizePath(root)
+	protectedDirs := append(SensitiveGreyproxyDirs(), filepath.Dir(source))
+	if m.macOSTmpDir != "" {
+		protectedDirs = append(protectedDirs, m.macOSTmpDir)
+	}
+	for _, protected := range protectedDirs {
+		relative, err := filepath.Rel(NormalizePath(protected), tempDir)
+		if err != nil {
+			return "", fmt.Errorf("check Greyproxy CA snapshot directory: %w", err)
+		}
+		if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+			return "", fmt.Errorf("greyproxy CA snapshot directory overlaps a protected directory")
+		}
+	}
+	if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("create Greyproxy CA root: %w", err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return "", fmt.Errorf("inspect Greyproxy CA root: %w", err)
+	}
+	stat, ok := rootInfo.Sys().(*syscall.Stat_t)
+	if !ok || !rootInfo.IsDir() || rootInfo.Mode().Perm() != 0o700 || int64(stat.Uid) != int64(os.Getuid()) {
+		return "", fmt.Errorf("unsafe Greyproxy CA root: %s", root)
+	}
+	dir, err := os.MkdirTemp(root, "session-")
+	if err != nil {
+		return "", fmt.Errorf("create Greyproxy CA snapshot directory: %w", err)
+	}
+	path := filepath.Join(dir, "ca-cert.pem")
+	if err := os.WriteFile(path, certificates, 0o600); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("write Greyproxy CA snapshot: %w", err)
+	}
+	m.macOSCADir = dir
+	return path, nil
+}
+
+func wrapCommandMacOS(cfg *config.Config, command string, exposedPorts []int, rewrittenEnvFiles map[string]string, tmpDir, certPath string, debug bool) (string, error) {
+	return wrapCommandMacOSWithRoot(cfg, command, exposedPorts, rewrittenEnvFiles, tmpDir, certPath, "", debug)
+}
+
+func wrapCommandMacOSWithRoot(cfg *config.Config, command string, exposedPorts []int, rewrittenEnvFiles map[string]string, tmpDir, certPath, caRoot string, debug bool) (string, error) {
+	if err := validateMacOSGreyproxyDataHome(); err != nil {
+		return "", err
+	}
 	cwd, _ := os.Getwd()
 
 	// Build allow paths: default + configured + per-session tmpdir
@@ -776,6 +981,11 @@ func WrapCommandMacOS(cfg *config.Config, command string, exposedPorts []int, re
 		AllowPty:                cfg.AllowPty,
 		AllowGitConfig:          cfg.Filesystem.AllowGitConfig,
 		RewrittenEnvFiles:       rewrittenEnvFiles,
+		CASnapshotRoot:          caRoot,
+	}
+	if certPath != "" {
+		params.CACertPath = certPath
+		params.WriteDenyPaths = append(append([]string(nil), params.WriteDenyPaths...), expandMacOSTmpPaths([]string{filepath.Dir(certPath)})...)
 	}
 
 	if debug && len(exposedPorts) > 0 {
@@ -800,7 +1010,7 @@ func WrapCommandMacOS(cfg *config.Config, command string, exposedPorts []int, re
 		return "", fmt.Errorf("shell %q not found: %w", shell, err)
 	}
 
-	proxyEnvs := GenerateProxyEnvVars(cfg.Network.ProxyURL, cfg.Network.HTTPProxyURL, tmpDir)
+	proxyEnvs := generateProxyEnvVars(cfg.Network.ProxyURL, cfg.Network.HTTPProxyURL, tmpDir, certPath)
 
 	// Build the command
 	// env VAR1=val1 VAR2=val2 sandbox-exec -p 'profile' shell -c 'command'

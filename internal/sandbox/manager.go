@@ -33,6 +33,8 @@ type Manager struct {
 	esloggerCmd       *exec.Cmd         // eslogger subprocess (macOS)
 	rewrittenEnvFiles map[string]string // original path -> temp path with credential placeholders
 	macOSTmpDir       string            // per-session TMPDIR created on macOS (cleaned up on exit)
+	macOSCADir        string
+	macOSCARoot       string
 }
 
 // NewManager creates a new sandbox manager.
@@ -281,7 +283,7 @@ func (m *Manager) WrapCommand(command string) (string, error) {
 		// wrapper still exports proxy env vars (HTTP_PROXY, ALL_PROXY, ...).
 		// The permissive overrides applied in main.go ensure the generated
 		// Seatbelt profile is wide-open for filesystem reads.
-		return WrapCommandMacOS(m.config, command, m.exposedPorts, m.rewrittenEnvFiles, m.macOSTmpDir, m.debug)
+		return m.wrapMacOSCommand(command)
 	case platform.Linux:
 		if m.learning {
 			return m.wrapCommandLearning(command)
@@ -374,6 +376,10 @@ func (m *Manager) Cleanup() {
 	if m.macOSTmpDir != "" {
 		_ = os.RemoveAll(m.macOSTmpDir)
 		m.macOSTmpDir = ""
+	}
+	if m.macOSCADir != "" {
+		_ = os.RemoveAll(m.macOSCADir)
+		m.macOSCADir = ""
 	}
 	m.logDebug("Sandbox manager cleaned up")
 }

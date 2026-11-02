@@ -1,0 +1,39 @@
+name: macOS public CA isolation
+
+on:
+  pull_request:
+    branches: [dotfiles]
+
+permissions:
+  contents: read
+
+jobs:
+  public-ca:
+    name: Isolated macOS CA and Seatbelt tests
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.25.14
+          cache: false
+
+      - name: Run isolated CA and Seatbelt tests
+        env:
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: |
+          set -o pipefail
+          command -v sandbox-exec
+          command -v curl
+          go test ./internal/sandbox -run '^TestMacOS_(PublicCA|ProtectsSharedCARootWithoutProxy|ProtectsOtherSessionSnapshot|ProtectsManagedProxyDirectoryWithoutConfiguredDenies|RejectsRelativeGreyproxyDataHome|StandaloneWrapperRejectsCAWithoutManagedSnapshot)' -count=1 -v | tee "$RUNNER_TEMP/public-ca-tests.log"
+          if grep -E -- '^--- SKIP: TestMacOS_(PublicCA|Protects|RejectsRelativeGreyproxyDataHome|StandaloneWrapperRejectsCAWithoutManagedSnapshot)' "$RUNNER_TEMP/public-ca-tests.log"; then
+            echo 'Required macOS CA tests were skipped' >&2
+            exit 1
+          fi
