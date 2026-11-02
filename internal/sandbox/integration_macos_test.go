@@ -15,11 +15,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestMacOS_PublicCAProxyFilterSyntax(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	for _, test := range []struct {
+		name string
+		rule string
+	}{
+		{name: "no proxy"},
+		{name: "numeric loopback", rule: `(allow network-outbound (remote tcp "127.0.0.1:12345"))`},
+		{name: "localhost", rule: `(allow network-outbound (remote tcp "localhost:12345"))`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile := "(version 1)\n(allow default)\n" + test.rule
+			output, err := exec.Command("/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/true").CombinedOutput()
+			if err != nil {
+				t.Errorf("isolated rule %q rejected: %v\n%s", test.rule, err, output)
+			}
+		})
+	}
+}
 
 func TestMacOS_PublicCAOtherSessionCannotReplaceSnapshot(t *testing.T) {
 	skipIfAlreadySandboxed(t)
