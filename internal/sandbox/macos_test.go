@@ -1,12 +1,399 @@
 package sandbox
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GreyhavenHQ/greywall/internal/config"
 )
+
+func writeMacOSTestCA(t *testing.T, dataDir string) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(dataDir, "ca-cert.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath
+}
+
+func newMacOSTestManager(t *testing.T, cfg *config.Config) *Manager {
+	t.Helper()
+	manager := NewManager(cfg, false, false)
+	manager.macOSCARoot = filepath.Join(t.TempDir(), "shared-ca-root")
+	t.Cleanup(manager.Cleanup)
+	return manager
+}
+
+func TestMacOS_PublicCAWrapperDoesNotPointIntoDeniedDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	certPath := writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{
+		Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"},
+		Filesystem: config.FilesystemConfig{
+			DenyRead:  []string{dataDir},
+			DenyWrite: []string{dataDir},
+		},
+	}
+
+	manager := newMacOSTestManager(t, cfg)
+	manager.macOSTmpDir = t.TempDir()
+	t.Cleanup(manager.Cleanup)
+	command, err := manager.wrapMacOSCommand("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshotPath string
+	for _, name := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"} {
+		var value string
+		for _, part := range strings.Fields(command) {
+			if strings.HasPrefix(part, name+"=") {
+				value = strings.TrimPrefix(part, name+"=")
+				break
+			}
+		}
+		if value == "" {
+			t.Errorf("%s is not set", name)
+			continue
+		}
+		if value == certPath {
+			t.Errorf("%s points into the explicitly denied proxy directory", name)
+		}
+		if snapshotPath == "" {
+			snapshotPath = value
+		} else if value != snapshotPath {
+			t.Errorf("%s points to %q, want %q", name, value, snapshotPath)
+		}
+	}
+	snapshot, err := os.ReadFile(snapshotPath) //nolint:gosec // snapshot path comes from the test fixture
+	if err != nil {
+		t.Fatalf("read CA snapshot: %v", err)
+	}
+	block, remaining := pem.Decode(snapshot)
+	if block == nil || block.Type != "CERTIFICATE" || len(remaining) != 0 {
+		t.Fatal("snapshot does not contain exactly one certificate")
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		t.Fatalf("parse CA snapshot: %v", err)
+	}
+	for _, operation := range []string{"file-read-data", "file-write*"} {
+		rule := fmt.Sprintf("(deny %s\n  (subpath %q)", operation, NormalizePath(dataDir))
+		if !strings.Contains(command, rule) {
+			t.Errorf("managed proxy directory %s deny is missing", operation)
+		}
+	}
+}
+
+func TestMacOS_PublicCARejectsExplicitCertificateDeny(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	certPath := writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{
+		Network:    config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"},
+		Filesystem: config.FilesystemConfig{DenyRead: []string{certPath}},
+	}
+	manager := newMacOSTestManager(t, cfg)
+	t.Cleanup(manager.Cleanup)
+	_, err := manager.wrapMacOSCommand("true")
+	if err == nil || !strings.Contains(err.Error(), "explicitly denied") {
+		t.Fatalf("expected explicit deny error, got %v", err)
+	}
+}
+
+func TestMacOS_PublicCARejectsAncestorDeny(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "greyproxy")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{
+		Network:    config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"},
+		Filesystem: config.FilesystemConfig{DenyRead: []string{parent}},
+	}
+	manager := newMacOSTestManager(t, cfg)
+	if _, err := manager.wrapMacOSCommand("true"); err == nil {
+		t.Fatal("CA was exposed despite an explicit ancestor deny")
+	}
+}
+
+func TestMacOS_PublicCARejectsAliasedGlobDeny(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "actual")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(dataDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{
+		Network:    config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"},
+		Filesystem: config.FilesystemConfig{DenyRead: []string{filepath.Join(alias, "ca-*.pem")}},
+	}
+	manager := newMacOSTestManager(t, cfg)
+	t.Cleanup(manager.Cleanup)
+	if _, err := manager.wrapMacOSCommand("true"); err == nil {
+		t.Fatal("CA explicitly denied through an aliased glob was exposed")
+	}
+}
+
+func TestMacOS_PublicCARejectsUnsafeSources(t *testing.T) {
+	for _, source := range []string{"private key", "symlink", "malformed", "malformed prefix"} {
+		t.Run(source, func(t *testing.T) {
+			dataDir := t.TempDir()
+			t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+			certPath := filepath.Join(dataDir, "ca-cert.pem")
+			switch source {
+			case "private key":
+				writeMacOSTestCA(t, dataDir)
+				file, err := os.OpenFile(certPath, os.O_APPEND|os.O_WRONLY, 0) //nolint:gosec // path is inside the test fixture
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := file.WriteString("-----BEGIN PRIVATE KEY-----\nYWJj\n-----END PRIVATE KEY-----\n"); err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, certPath); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed":
+				if err := os.WriteFile(certPath, []byte("invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed prefix":
+				writeMacOSTestCA(t, dataDir)
+				valid, err := os.ReadFile(certPath) //nolint:gosec // path is inside the test fixture
+				if err != nil {
+					t.Fatal(err)
+				}
+				contents := append([]byte("-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n"), valid...)
+				if err := os.WriteFile(certPath, contents, 0o600); err != nil { //nolint:gosec // path is inside the test fixture
+					t.Fatal(err)
+				}
+			}
+			cfg := &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}}
+			manager := newMacOSTestManager(t, cfg)
+			t.Cleanup(manager.Cleanup)
+			if _, err := manager.wrapMacOSCommand("true"); err == nil {
+				t.Fatal("unsafe CA source was accepted")
+			}
+			if manager.macOSCADir != "" {
+				t.Error("unsafe CA source left a snapshot directory")
+			}
+		})
+	}
+}
+
+func TestMacOS_PublicCASnapshotRemovedOnCleanup(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}}
+	manager := newMacOSTestManager(t, cfg)
+	t.Cleanup(manager.Cleanup)
+	if _, err := manager.wrapMacOSCommand("true"); err != nil {
+		t.Fatal(err)
+	}
+	dir := manager.macOSCADir
+	manager.Cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("snapshot directory remains after cleanup: %v", err)
+	}
+}
+
+func TestMacOS_PublicCARejectsSnapshotInsideManagedDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	t.Setenv("TMPDIR", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}}
+	manager := newMacOSTestManager(t, cfg)
+	manager.macOSCARoot = filepath.Join(dataDir, "shared-ca-root")
+	t.Cleanup(manager.Cleanup)
+	if _, err := manager.wrapMacOSCommand("true"); err == nil {
+		t.Fatal("snapshot inside the managed directory was accepted")
+	}
+}
+
+func TestMacOS_PublicCAAbsentOrProxyDisabledDoesNotCreateSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		proxyURL   string
+		createCert bool
+	}{
+		{name: "absent CA", proxyURL: "socks5://127.0.0.1:12345"},
+		{name: "absent explicitly denied CA", proxyURL: "socks5://127.0.0.1:12345"},
+		{name: "proxy disabled", createCert: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+			if test.createCert {
+				writeMacOSTestCA(t, dataDir)
+			}
+			cfg := &config.Config{Network: config.NetworkConfig{ProxyURL: test.proxyURL}}
+			if test.name == "absent explicitly denied CA" {
+				cfg.Filesystem.DenyRead = []string{filepath.Join(dataDir, "ca-cert.pem")}
+			}
+			manager := newMacOSTestManager(t, cfg)
+			t.Cleanup(manager.Cleanup)
+			command, err := manager.wrapMacOSCommand("true")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if manager.macOSCADir != "" || strings.Contains(command, "SSL_CERT_FILE=") {
+				t.Error("unexpected CA snapshot or environment variable")
+			}
+		})
+	}
+}
+
+func TestMacOS_PublicCAAbsentSnapshotNeverExportsSource(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}}
+	command, err := wrapCommandMacOS(cfg, "true", nil, nil, "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"} {
+		if strings.Contains(command, name+"=") {
+			t.Errorf("%s exported without a validated snapshot", name)
+		}
+	}
+}
+
+func TestMacOS_StandaloneWrapperRejectsCAWithoutManagedSnapshot(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	cfg := &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}}
+	if _, err := WrapCommandMacOS(cfg, "true", nil, nil, "", false); err == nil {
+		t.Fatal("standalone wrapper silently discarded the configured CA")
+	}
+}
+
+func TestMacOS_ProtectsSharedCARootWithoutProxy(t *testing.T) {
+	root := filepath.Join("/private/tmp", fmt.Sprintf("greywall-ca-%d", os.Getuid()))
+	profile := GenerateSandboxProfile(MacOSSandboxParams{
+		WriteAllowPaths: []string{"/private/tmp"},
+	})
+	for _, path := range []string{root, strings.TrimPrefix(root, "/private")} {
+		rule := fmt.Sprintf("(deny file-write* (subpath %q))", path)
+		if !strings.Contains(profile, rule) {
+			t.Errorf("shared CA root is not protected at %q", path)
+		}
+	}
+}
+
+func TestMacOS_ProtectsOtherSessionSnapshot(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	root := filepath.Join(t.TempDir(), "shared-ca-root")
+	first := newMacOSTestManager(t, &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}})
+	first.macOSCARoot = root
+	if _, err := first.wrapMacOSCommand("true"); err != nil {
+		t.Fatal(err)
+	}
+	second := newMacOSTestManager(t, &config.Config{Filesystem: config.FilesystemConfig{AllowWrite: []string{filepath.Dir(root)}}})
+	second.macOSCARoot = root
+	command, err := second.wrapMacOSCommand("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(command, fmt.Sprintf("(deny file-write* (subpath %q))", root)) {
+		t.Fatal("second session does not protect the first session's snapshot")
+	}
+}
+
+func TestMacOS_ProtectsManagedProxyDirectoryWithoutConfiguredDenies(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	profile := GenerateSandboxProfile(MacOSSandboxParams{})
+	for _, operation := range []string{"file-read-data", "file-write*"} {
+		rule := fmt.Sprintf("(deny %s\n  (subpath %q)", operation, NormalizePath(dataDir))
+		if !strings.Contains(profile, rule) {
+			t.Errorf("managed directory lacks mandatory %s deny", operation)
+		}
+	}
+}
+
+func TestMacOS_RejectsRelativeGreyproxyDataHome(t *testing.T) {
+	t.Setenv("GREYPROXY_DATA_HOME", "relative/proxy")
+	manager := newMacOSTestManager(t, &config.Config{})
+	if _, err := manager.wrapMacOSCommand("true"); err == nil {
+		t.Error("relative GREYPROXY_DATA_HOME was accepted")
+	}
+	if _, err := WrapCommandMacOS(&config.Config{}, "true", nil, nil, "", false); err == nil {
+		t.Error("standalone wrapper accepted relative GREYPROXY_DATA_HOME")
+	}
+}
+
+func TestMacOS_PublicCARejectsUnsafeSharedRoot(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{name: "world writable", mode: 0o777},
+		{name: "world readable", mode: 0o755},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+			writeMacOSTestCA(t, dataDir)
+			manager := newMacOSTestManager(t, &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}})
+			if err := os.Mkdir(manager.macOSCARoot, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(manager.macOSCARoot, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.wrapMacOSCommand("true"); err == nil {
+				t.Fatal("unsafe snapshot root was accepted")
+			}
+		})
+	}
+}
 
 // TestMacOS_NetworkRestrictionWithProxy verifies that when a proxy URL is set,
 // the macOS sandbox profile allows outbound to the proxy host:port.

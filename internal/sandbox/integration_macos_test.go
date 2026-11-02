@@ -3,12 +3,191 @@
 package sandbox
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestMacOS_PublicCAOtherSessionCannotReplaceSnapshot(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	workspace := createTempWorkspace(t)
+	dataDir := t.TempDir()
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	writeMacOSTestCA(t, dataDir)
+	first := NewManager(testConfigWithProxy("socks5://127.0.0.1:12345"), false, false)
+	t.Cleanup(first.Cleanup)
+	if err := first.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.WrapCommand("true"); err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(first.macOSCADir, "ca-cert.pem")
+	original, err := os.ReadFile(snapshotPath) //nolint:gosec // snapshot is owned by the fixture manager
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondConfig := testConfigWithWorkspace(workspace)
+	secondConfig.Filesystem.AllowWrite = append(secondConfig.Filesystem.AllowWrite, "/private/tmp")
+	alias := strings.Replace(snapshotPath, "/private/tmp/", "/tmp/", 1)
+	for _, command := range []string{
+		"echo changed > " + ShellQuoteSingle(snapshotPath),
+		"echo changed > " + ShellQuoteSingle(alias),
+		"rm " + ShellQuoteSingle(snapshotPath),
+		"mv " + ShellQuoteSingle(snapshotPath) + " " + ShellQuoteSingle(snapshotPath+".moved"),
+		"mv " + ShellQuoteSingle(first.macOSCADir) + " " + ShellQuoteSingle(first.macOSCADir+".moved"),
+	} {
+		result := runUnderSandbox(t, secondConfig, command, workspace)
+		assertBlocked(t, result)
+		if !strings.Contains(result.Stderr, "Operation not permitted") && !strings.Contains(result.Stderr, "Permission denied") {
+			t.Errorf("expected a filesystem denial for %q, got %q", command, result.Stderr)
+		}
+	}
+	current, err := os.ReadFile(snapshotPath) //nolint:gosec // snapshot is owned by the fixture manager
+	if err != nil || !bytes.Equal(original, current) {
+		t.Fatalf("another sandbox changed the snapshot: %v", err)
+	}
+}
+
+func TestMacOS_PublicCATLSAndManagedDirectoryIsolation(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+	skipIfCommandNotFound(t, "curl")
+	workspace := createTempWorkspace(t)
+	dataDir := filepath.Join(t.TempDir(), "greyproxy")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := &x509.Certificate{
+		SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err = x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "ca-cert.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCert := &x509.Certificate{
+		SerialNumber: big.NewInt(2), NotBefore: ca.NotBefore, NotAfter: ca.NotAfter,
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	serverDER, err := x509.CreateCertificate(rand.Reader, serverCert, ca, &serverKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("isolated TLS fixture"))
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{serverDER}, PrivateKey: serverKey}}, MinVersion: tls.VersionTLS12}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	for _, name := range []string{"ca-key.pem", "session.key", "greyproxy.db", "new-secret"} {
+		if err := os.WriteFile(filepath.Join(dataDir, name), []byte("private fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Network.ProxyURL = "socks5://127.0.0.1:12345"
+	cfg.Network.AllowLocalOutbound = boolPtr(true)
+	unrelatedCA := writeMacOSTestCA(t, workspace)
+	for _, defaultDenyRead := range []bool{false, true} {
+		cfg.Filesystem.DefaultDenyRead = boolPtr(defaultDenyRead)
+		result := runUnderSandbox(t, cfg, `curl --noproxy '*' --silent --show-error --fail --cacert "$SSL_CERT_FILE" `+ShellQuoteSingle(server.URL), workspace)
+		assertAllowed(t, result)
+		assertContains(t, result.Stdout, "isolated TLS fixture")
+		assertAllowed(t, runUnderSandbox(t, cfg, "test -r "+ShellQuoteSingle(unrelatedCA), workspace))
+		untrusted := runUnderSandbox(t, cfg, "curl --noproxy '*' --silent --show-error --fail --cacert "+ShellQuoteSingle(unrelatedCA)+" "+ShellQuoteSingle(server.URL), workspace)
+		if untrusted.ExitCode != 60 {
+			t.Errorf("expected certificate verification failure (curl exit 60), got %d: %s", untrusted.ExitCode, untrusted.Stderr)
+		}
+		for _, name := range []string{"ca-key.pem", "session.key", "greyproxy.db", "new-secret"} {
+			path := ShellQuoteSingle(filepath.Join(dataDir, name))
+			assertBlocked(t, runUnderSandbox(t, cfg, "cat "+path, workspace))
+			assertBlocked(t, runUnderSandbox(t, cfg, "echo changed > "+path, workspace))
+		}
+		assertBlocked(t, runUnderSandbox(t, cfg, "touch "+ShellQuoteSingle(filepath.Join(dataDir, "created")), workspace))
+		assertBlocked(t, runUnderSandbox(t, cfg, `echo changed > "$SSL_CERT_FILE"`, workspace))
+		assertBlocked(t, runUnderSandbox(t, cfg, `rm "$SSL_CERT_FILE"`, workspace))
+		assertBlocked(t, runUnderSandbox(t, cfg, `mv "$SSL_CERT_FILE" "$SSL_CERT_FILE.moved"`, workspace))
+		assertBlocked(t, runUnderSandbox(t, cfg, `mv "$(dirname "$SSL_CERT_FILE")" "$(dirname "$SSL_CERT_FILE").moved"`, workspace))
+	}
+}
+
+func TestMacOS_PublicCAReadableWhileProxyStateDenied(t *testing.T) {
+	skipIfAlreadySandboxed(t)
+
+	workspace := createTempWorkspace(t)
+	dataDir := filepath.Join(t.TempDir(), "greyproxy")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GREYPROXY_DATA_HOME", dataDir)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(dataDir, "ca-cert.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(dataDir, "greyproxy.db")
+	if err := os.WriteFile(secretPath, []byte("private fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfigWithWorkspace(workspace)
+	cfg.Network.ProxyURL = "socks5://127.0.0.1:12345"
+	cfg.Filesystem.DenyRead = []string{dataDir}
+	cfg.Filesystem.DenyWrite = []string{dataDir}
+
+	result := runUnderSandbox(t, cfg, `test "$SSL_CERT_FILE" = "$NODE_EXTRA_CA_CERTS" && test "$SSL_CERT_FILE" = "$REQUESTS_CA_BUNDLE" && cat "$SSL_CERT_FILE"`, workspace)
+	assertAllowed(t, result)
+	assertContains(t, result.Stdout, "BEGIN CERTIFICATE")
+
+	result = runUnderSandbox(t, cfg, "cat "+ShellQuote([]string{secretPath}), workspace)
+	assertBlocked(t, result)
+}
 
 // ============================================================================
 // macOS-Specific Integration Tests (Seatbelt)

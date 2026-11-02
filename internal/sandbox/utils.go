@@ -52,6 +52,10 @@ func NormalizePath(pathPattern string) string {
 // proxyURL is the SOCKS5 proxy (for ALL_PROXY), httpProxyURL is the HTTP CONNECT proxy (for HTTP_PROXY/HTTPS_PROXY).
 // tmpDir is the per-session temporary directory to expose as TMPDIR; if empty, TMPDIR is not overridden.
 func GenerateProxyEnvVars(proxyURL, httpProxyURL, tmpDir string) []string {
+	return generateProxyEnvVars(proxyURL, httpProxyURL, tmpDir, greyproxyCACertPath())
+}
+
+func generateProxyEnvVars(proxyURL, httpProxyURL, tmpDir, certPath string) []string {
 	envVars := []string{"GREYWALL_SANDBOX=1"}
 	if tmpDir != "" {
 		envVars = append(envVars, "TMPDIR="+tmpDir)
@@ -105,7 +109,7 @@ func GenerateProxyEnvVars(proxyURL, httpProxyURL, tmpDir string) []string {
 	// NODE_EXTRA_CA_CERTS: Node.js uses its own compiled-in CA bundle and ignores the OS keychain.
 	// SSL_CERT_FILE: Used by OpenSSL-based tools (Python, Ruby, curl, wget, Go, etc.).
 	// REQUESTS_CA_BUNDLE: Used by Python requests/httpx/aider and other Python HTTP clients.
-	if certPath := greyproxyCACertPath(); certPath != "" {
+	if certPath != "" {
 		envVars = append(envVars, "NODE_EXTRA_CA_CERTS="+certPath)
 		envVars = append(envVars, "SSL_CERT_FILE="+certPath)
 		envVars = append(envVars, "REQUESTS_CA_BUNDLE="+certPath)
