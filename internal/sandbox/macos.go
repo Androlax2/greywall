@@ -862,7 +862,11 @@ func (m *Manager) snapshotMacOSCA() (string, error) {
 	if root == "" {
 		root = macOSCASnapshotRoot()
 	}
-	tempDir := NormalizePath(root)
+	resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve Greyproxy CA snapshot parent: %w", err)
+	}
+	tempDir := filepath.Join(resolvedParent, filepath.Base(root))
 	protectedDirs := append(SensitiveGreyproxyDirs(), filepath.Dir(source))
 	if m.macOSTmpDir != "" {
 		protectedDirs = append(protectedDirs, m.macOSTmpDir)
