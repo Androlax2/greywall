@@ -196,8 +196,44 @@ func runUnderSandbox(t *testing.T, cfg *config.Config, command string, workDir s
 	if result.Failed() && strings.HasPrefix(t.Name(), "TestMacOS_PublicCA") &&
 		(strings.HasPrefix(command, `test "$SSL_CERT_FILE" =`) || strings.Contains(command, `--cacert "$SSL_CERT_FILE"`)) {
 		t.Logf("isolated CA fixture sandbox command:\n%s", wrappedCmd)
+		logRejectedSeatbeltRegexes(t, wrappedCmd, workDir)
 	}
 	return result
+}
+
+func logRejectedSeatbeltRegexes(t *testing.T, wrappedCmd, workDir string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	capture := strings.Replace(wrappedCmd, "sandbox-exec -p ", `/bin/sh -c 'printf "%s" "$1"' diagnostic `, 1)
+	if capture == wrappedCmd {
+		t.Log("diagnostic could not locate the generated profile")
+		return
+	}
+	result := executeShellCommand(t, capture, workDir)
+	if result.Failed() {
+		t.Logf("diagnostic could not capture the generated profile: %v", result.Error)
+		return
+	}
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		start := strings.Index(line, "(regex ")
+		end := strings.LastIndex(line, ")")
+		if start < 0 || end < start {
+			continue
+		}
+		expression := line[start : end+1]
+		if seen[expression] || !strings.Contains(expression, "*") {
+			continue
+		}
+		seen[expression] = true
+		profile := "(version 1)\n(allow default)\n(deny file-write* " + expression + ")"
+		output, err := exec.Command("/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/true").CombinedOutput() //nolint:gosec // profile comes from the isolated test fixture
+		if err != nil {
+			t.Logf("isolated regex %s: %v\n%s", expression, err, output)
+		}
+	}
 }
 
 // runUnderSandboxWithTimeout runs a command with a timeout.

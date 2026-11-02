@@ -253,6 +253,29 @@ func TestMacOS_PublicCARejectsSnapshotInsideManagedDirectory(t *testing.T) {
 	}
 }
 
+func TestMacOS_PublicCARejectsSnapshotUnderAliasedManagedDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "actual")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(dataDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GREYPROXY_DATA_HOME", alias)
+	writeMacOSTestCA(t, alias)
+	cfg := &config.Config{Network: config.NetworkConfig{ProxyURL: "socks5://127.0.0.1:12345"}}
+	manager := newMacOSTestManager(t, cfg)
+	manager.macOSCARoot = filepath.Join(alias, "new-root")
+	if _, err := manager.wrapMacOSCommand("true"); err == nil {
+		t.Error("snapshot inside the aliased managed directory was accepted")
+	}
+	if _, err := os.Lstat(manager.macOSCARoot); !os.IsNotExist(err) {
+		t.Errorf("overlapping snapshot root was created: %v", err)
+	}
+}
+
 func TestMacOS_PublicCAAbsentOrProxyDisabledDoesNotCreateSnapshot(t *testing.T) {
 	for _, test := range []struct {
 		name       string
