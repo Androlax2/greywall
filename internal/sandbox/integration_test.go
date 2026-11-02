@@ -192,7 +192,12 @@ func runUnderSandbox(t *testing.T, cfg *config.Config, command string, workDir s
 		}
 	}
 
-	return executeShellCommand(t, wrappedCmd, workDir)
+	result := executeShellCommand(t, wrappedCmd, workDir)
+	if result.Failed() && strings.HasPrefix(t.Name(), "TestMacOS_PublicCA") &&
+		(strings.HasPrefix(command, `test "$SSL_CERT_FILE" =`) || strings.Contains(command, `--cacert "$SSL_CERT_FILE"`)) {
+		t.Logf("isolated CA fixture sandbox command:\n%s", wrappedCmd)
+	}
+	return result
 }
 
 // runUnderSandboxWithTimeout runs a command with a timeout.
